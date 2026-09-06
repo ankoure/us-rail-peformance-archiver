@@ -128,7 +128,9 @@ class GtfsResolver:
         self.cache_dir = Path(cache_dir)
         self.api_url = api_url
         self._catalog: pd.DataFrame | None = None
-        self._loaded: dict[tuple[str, str | None], StaticGtfs] = {}
+        self._loaded: dict[
+            tuple[str, str | None, frozenset | None, frozenset | None], StaticGtfs
+        ] = {}
 
     def catalog(self) -> pd.DataFrame:
         """The feed's archived-feeds catalog, fetched once and memoized."""
@@ -137,7 +139,11 @@ class GtfsResolver:
         return self._catalog
 
     def for_date(
-        self, target_date: dt.date, agency_prefix: str | None = None
+        self,
+        target_date: dt.date,
+        agency_prefix: str | None = None,
+        agency_ids: frozenset[str] | None = None,
+        route_types: frozenset[int] | None = None,
     ) -> StaticGtfs:
         """StaticGtfs for the schedule in effect on `target_date`.
 
@@ -146,17 +152,23 @@ class GtfsResolver:
         the resolver's lifetime, so a date range sharing one schedule pays the
         cost a single time.
 
-        `agency_prefix` is forwarded to StaticGtfs (see its docstring) for a
-        zip covering multiple operators under one mdb_feed_id -- e.g. one
-        agency_id's several feeds each scoped to a different operator within
-        the same national feed (GO_AHEAD/Entur). The cache key includes it, so
-        the same snapshot requested under two different prefixes gets two
-        independently-filtered StaticGtfs instances rather than one shared
+        `agency_prefix`/`agency_ids`/`route_types` are forwarded to StaticGtfs
+        (see its docstring) for a zip covering multiple operators under one
+        mdb_feed_id -- e.g. one agency_id's several feeds each scoped to a
+        different operator within the same national feed (GO_AHEAD/Entur,
+        TFNSW's/Transport for NSW's various modes). The cache key includes
+        them, so the same snapshot requested under two different scopes gets
+        two independently-filtered StaticGtfs instances rather than one shared
         (and, for that reason, unfiltered) one.
         """
         snap = pick_snapshot(self.catalog(), target_date)
-        cache_key = (snap.version_slug, agency_prefix)
+        cache_key = (snap.version_slug, agency_prefix, agency_ids, route_types)
         if cache_key not in self._loaded:
             path = ensure_local_zip(snap, self.agency, self.cache_dir)
-            self._loaded[cache_key] = StaticGtfs(path, agency_prefix=agency_prefix)
+            self._loaded[cache_key] = StaticGtfs(
+                path,
+                agency_prefix=agency_prefix,
+                agency_ids=agency_ids,
+                route_types=route_types,
+            )
         return self._loaded[cache_key]

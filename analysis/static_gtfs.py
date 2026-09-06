@@ -52,27 +52,56 @@ class StaticGtfs:
     omits e.g. calendar_dates.txt still works. The zip is never extracted to
     disk — tables are read straight out of the archive.
 
-    `agency_prefix` scopes every table to one GTFS `agency_id` (matched as
-    `f"{agency_prefix}:"` against routes.txt's agency_id column) for a zip that
-    covers MULTIPLE operators under one mdb_feed_id -- e.g. Entur's Norwegian
-    national feed (mdb-1078), which GO_AHEAD's config feeds share even though
-    each is really one operator's slice of it (GOA/RUT/VYB/VYX). Confirmed
-    2026-09-06: that zip's shapes.txt alone is 38M rows / 2.57 GB, and reading
-    it whole (the None/default path, unchanged for every other agency) OOMed a
-    20 GiB container before it could even finish parsing. When set,
-    `routes`/`trips` filter after a normal full read (both small: 291 KB /
-    62 MB here), then `shapes`/`stop_times` (the two big tables) filter WHILE
-    reading, chunk by chunk, so peak memory is bounded by one chunk instead of
-    the whole file -- filtering after a full read wouldn't help, since the
-    unfiltered read is the peak. None (the default) reproduces the exact prior
-    behavior for every agency that isn't a multi-operator aggregator.
+    Three mutually-exclusive, optional ways to scope every table to a slice of
+    a zip that covers MULTIPLE operators under one mdb_feed_id -- a single
+    config agency never needs more than one of these at a time:
+
+      `agency_prefix` matches `f"{agency_prefix}:"` against routes.txt's
+      agency_id -- e.g. Entur's Norwegian national feed (mdb-1078), which
+      GO_AHEAD's config feeds share even though each is really one operator's
+      slice of it (GOA/RUT/VYB/VYX).
+
+      `agency_ids` matches an exact agency_id SET -- for an operator (or small
+      group of them) with no shared prefix, e.g. Transport for NSW's combined
+      feed (mdb-2449, TFNSW_SYDNEY_TRAINS=x0001, TFNSW_LIGHT_RAIL={SLR,PLR,LR}).
+
+      `route_types` matches an exact GTFS route_type SET -- for a config
+      agency whose routes span hundreds of distinct, unenumerable agency_ids
+      but share a mode, e.g. TFNSW_BUSES (route_type 700/712/714 across 644
+      bus-operator agency_ids -- listing them individually isn't practical the
+      way it is for the five-or-fewer-operator cases above).
+
+    Confirmed 2026-09-06: Entur's shapes.txt alone is 38M rows / 2.57 GB and
+    TfNSW's is 1.01 GB (423 MB stop_times.txt) -- reading either whole (the
+    all-None/default path, unchanged for every other agency) OOMed a 20 GiB
+    container before finishing parsing. When any filter is set, `routes`/
+    `trips` filter after a normal full read (both small even for these two:
+    routes.txt/trips.txt are KB-MB, not GB), then `shapes`/`stop_times` (the
+    two big tables) filter WHILE reading, chunk by chunk, so peak memory is
+    bounded by one chunk instead of the whole file -- filtering after a full
+    read wouldn't help, since the unfiltered read is itself the peak. All-None
+    (the default) reproduces the exact prior behavior for every agency that
+    isn't a multi-operator aggregator.
     """
 
-    def __init__(self, zip_path: Path | str, agency_prefix: str | None = None) -> None:
+    def __init__(
+        self,
+        zip_path: Path | str,
+        agency_prefix: str | None = None,
+        agency_ids: frozenset[str] | None = None,
+        route_types: frozenset[int] | None = None,
+    ) -> None:
         self.zip_path = Path(zip_path)
         if not self.zip_path.exists():
             raise FileNotFoundError(self.zip_path)
         self.agency_prefix = agency_prefix
+        self.agency_ids = agency_ids
+        self.route_types = route_types
+
+    @property
+    def _scoped(self) -> bool:
+        """Whether any of the three filters in the class docstring is active."""
+        return bool(self.agency_prefix or self.agency_ids or self.route_types)
 
     def __repr__(self) -> str:
         return f"StaticGtfs({self.zip_path})"
@@ -156,11 +185,11 @@ class StaticGtfs:
                     "shape_id",
                 ]
             )
-        if self.agency_prefix:
-            # trips.txt has no agency_id of its own -- scope via the
-            # already-filtered routes instead. Both tables are small enough
-            # (tens of MB) to read whole even unfiltered; only the two big
-            # tables below (shapes/stop_times) need chunked filtering.
+        if self._scoped:
+            # trips.txt has no agency_id or route_type of its own -- scope via
+            # the already-filtered routes instead. Both tables are small
+            # enough (tens of MB) to read whole even unfiltered; only the two
+            # big tables below (shapes/stop_times) need chunked filtering.
             df = df[df["route_id"].isin(self.routes["route_id"])]
         return df
 
@@ -199,6 +228,12 @@ class StaticGtfs:
             )
         if self.agency_prefix and "agency_id" in df.columns:
             df = df[df["agency_id"].str.startswith(f"{self.agency_prefix}:")]
+        elif self.agency_ids and "agency_id" in df.columns:
+            df = df[df["agency_id"].isin(self.agency_ids)]
+        elif self.route_types and "route_type" in df.columns:
+            df = df[
+                pd.to_numeric(df["route_type"], errors="coerce").isin(self.route_types)
+            ]
         return df
 
     @cached_property
@@ -265,7 +300,7 @@ class StaticGtfs:
             }
         )
         try:
-            if self.agency_prefix:
+            if self._scoped:
                 relevant_shape_ids = set(self.trips["shape_id"].dropna())
                 return self._read_chunked_filtered(
                     "shapes.txt",
@@ -724,7 +759,7 @@ class StaticGtfs:
             }
         )
         dtype = {"trip_id": str, "stop_id": str, "checkpoint_id": str}
-        if self.agency_prefix:
+        if self._scoped:
             df = self._read_chunked_filtered(
                 "stop_times.txt",
                 filter_col="trip_id",

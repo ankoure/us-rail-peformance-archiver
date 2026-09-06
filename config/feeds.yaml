@@ -1241,6 +1241,17 @@ agencies:
   #     ferries,buses,nswtrains}): all verified strict subsets of alerts/all
   #     by entity id, so adding them would double-archive the same alerts.
 
+  # mdb-2449 (this agency's static schedule, below, shared by all TFNSW_*
+  # agencies) is TfNSW's "Timetables Complete GTFS" -- every operator in the
+  # state, regional/trackwork/coach routes included: 698 agency_id rows,
+  # shapes.txt alone 1.01 GB. Confirmed 2026-09-06: reading it unfiltered
+  # SIGKILLed every TFNSW_* agency except sydney-trains in stage-gtfs (exit
+  # -9), the same class of bug as GO_AHEAD/Entur -- see
+  # analysis/static_gtfs.py's StaticGtfs docstring. This generic "TFNSW"
+  # agency (alerts only, spanning every mode) is the one exception left
+  # unscoped: unlike the other seven, there's no single agency_id/route_type
+  # that correctly represents "could be any mode" without risking a wrong
+  # (rather than just incomplete) marts build. Revisit if it keeps SIGKILLing.
   - agency_id: TFNSW
     name: Transport for New South Wales
     region: New South Wales
@@ -1269,16 +1280,19 @@ agencies:
       header: Authorization
       env: TFNSW_API_KEY
     feeds:
+      # agency_id "x0001" = "Sydney Trains" in mdb-2449's agency.txt.
       - name: tfnsw-sydney-trains-trips
         path: /v2/gtfs/realtime/sydneytrains
         expected_format: protobuf
         decoder: tfnsw
         poll_interval_seconds: 30
+        gtfs_agency_ids: [x0001]
       - name: tfnsw-sydney-trains-vehicles
         path: /v2/gtfs/vehiclepos/sydneytrains
         expected_format: protobuf
         decoder: tfnsw
         poll_interval_seconds: 30
+        gtfs_agency_ids: [x0001]
 
   - agency_id: TFNSW_METRO
     name: Transport for New South Wales - Metro
@@ -1291,16 +1305,19 @@ agencies:
       header: Authorization
       env: TFNSW_API_KEY
     feeds:
+      # agency_id "SMNW" = "Sydney Metro" in mdb-2449's agency.txt.
       - name: tfnsw-metro-trips
         path: /v2/gtfs/realtime/metro
         expected_format: protobuf
         decoder: tfnsw
         poll_interval_seconds: 30
+        gtfs_agency_ids: [SMNW]
       - name: tfnsw-metro-vehicles
         path: /v2/gtfs/vehiclepos/metro
         expected_format: protobuf
         decoder: tfnsw
         poll_interval_seconds: 30
+        gtfs_agency_ids: [SMNW]
 
   # Sydney Light Rail: Inner West (v2) and CBD & South East (v1) are the same
   # operator on different API versions -- the case the host-only base_url above
@@ -1318,26 +1335,34 @@ agencies:
       header: Authorization
       env: TFNSW_API_KEY
     feeds:
+      # agency.txt has Sydney Light Rail under BOTH "SLR" and "LR" (its two
+      # lines predate a rebrand or are tracked separately internally) plus
+      # Parramatta's own "PLR" -- all three belong under this one config
+      # agency regardless of which of the four feeds below.
       - name: tfnsw-light-rail-trips
         path: /v2/gtfs/realtime/lightrail/innerwest
         expected_format: protobuf
         decoder: tfnsw
         poll_interval_seconds: 30
+        gtfs_agency_ids: [SLR, LR, PLR]
       - name: tfnsw-light-rail-vehicles
         path: /v2/gtfs/vehiclepos/lightrail/innerwest
         expected_format: protobuf
         decoder: tfnsw
         poll_interval_seconds: 30
+        gtfs_agency_ids: [SLR, LR, PLR]
       - name: tfnsw-light-rail-cbd-trips
         path: /v1/gtfs/realtime/lightrail/cbdandsoutheast
         expected_format: protobuf
         decoder: tfnsw
         poll_interval_seconds: 30
+        gtfs_agency_ids: [SLR, LR, PLR]
       - name: tfnsw-light-rail-cbd-vehicles
         path: /v1/gtfs/vehiclepos/lightrail/cbdandsoutheast
         expected_format: protobuf
         decoder: tfnsw
         poll_interval_seconds: 30
+        gtfs_agency_ids: [SLR, LR, PLR]
 
   # Newcastle is a separate system ~160km from Sydney, so it gets its own
   # agency rather than a third line under TFNSW_LIGHT_RAIL.
@@ -1352,16 +1377,19 @@ agencies:
       header: Authorization
       env: TFNSW_API_KEY
     feeds:
+      # agency_id "NT" = "Newcastle Transport" in mdb-2449's agency.txt.
       - name: tfnsw-newcastle-light-rail-trips
         path: /v1/gtfs/realtime/lightrail/newcastle
         expected_format: protobuf
         decoder: tfnsw
         poll_interval_seconds: 30
+        gtfs_agency_ids: [NT]
       - name: tfnsw-newcastle-light-rail-vehicles
         path: /v1/gtfs/vehiclepos/lightrail/newcastle
         expected_format: protobuf
         decoder: tfnsw
         poll_interval_seconds: 30
+        gtfs_agency_ids: [NT]
 
   # NB: tfnsw-buses-trips is by far the largest feed in this config -- ~4.7MB
   # and ~3350 entities per poll, i.e. ~6.8 GB/day at the 60s interval below
@@ -1379,16 +1407,24 @@ agencies:
       header: Authorization
       env: TFNSW_API_KEY
     feeds:
+      # route_type, not agency_id: 644 distinct bus-operator agency_ids in
+      # mdb-2449 isn't practical to enumerate. 700/712/714 are the extended
+      # (AU-specific) bus route_type codes that cover the whole bus network,
+      # derived from mdb-2449 itself (confirmed 2026-09-06) rather than
+      # TfNSW's own docs -- if a bus route ever shows up under a route_type
+      # not in this set, it'll silently drop out of this feed's marts.
       - name: tfnsw-buses-trips
         path: /v1/gtfs/realtime/buses
         expected_format: protobuf
         decoder: tfnsw
         poll_interval_seconds: 60
+        gtfs_route_types: [700, 712, 714]
       - name: tfnsw-buses-vehicles
         path: /v1/gtfs/vehiclepos/buses
         expected_format: protobuf
         decoder: tfnsw
         poll_interval_seconds: 30
+        gtfs_route_types: [700, 712, 714]
 
   - agency_id: TFNSW_NSW_TRAINS
     name: Transport for New South Wales - NSW TrainLink
@@ -1401,16 +1437,21 @@ agencies:
       header: Authorization
       env: TFNSW_API_KEY
     feeds:
+      # agency_id "X0000" = "NSW Trains" and "X000" = "Intercity Train" in
+      # mdb-2449's agency.txt -- both are NSW TrainLink's regional/intercity
+      # services, distinct from "x0001" Sydney Trains' metro network above.
       - name: tfnsw-nsw-trains-trips
         path: /v1/gtfs/realtime/nswtrains
         expected_format: protobuf
         decoder: tfnsw
         poll_interval_seconds: 30
+        gtfs_agency_ids: [X0000, X000]
       - name: tfnsw-nsw-trains-vehicles
         path: /v1/gtfs/vehiclepos/nswtrains
         expected_format: protobuf
         decoder: tfnsw
         poll_interval_seconds: 30
+        gtfs_agency_ids: [X0000, X000]
 
   # v1 only -- the v2 ferries endpoints are dead (see survey note above).
   # tfnsw-ferries-vehicles is intermittent: observed 7 vehicles at one poll and
@@ -1428,16 +1469,21 @@ agencies:
       header: Authorization
       env: TFNSW_API_KEY
     feeds:
+      # route_type 4 (standard GTFS "Ferry", not an extended/custom code) --
+      # 11 distinct ferry-operator agency_ids in mdb-2449, all exclusively
+      # route_type 4, so this is unambiguous unlike the bus codes above.
       - name: tfnsw-ferries-trips
         path: /v1/gtfs/realtime/ferries/sydneyferries
         expected_format: protobuf
         decoder: tfnsw
         poll_interval_seconds: 30
+        gtfs_route_types: [4]
       - name: tfnsw-ferries-vehicles
         path: /v1/gtfs/vehiclepos/ferries/sydneyferries
         expected_format: protobuf
         decoder: tfnsw
         poll_interval_seconds: 30
+        gtfs_route_types: [4]
 
   # Trafiklab (Sweden) -- github #45. Portal
   # https://developer.trafiklab.se/register. ONE shared key (param `key`,

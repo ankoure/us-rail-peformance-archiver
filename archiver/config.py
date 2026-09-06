@@ -99,6 +99,19 @@ class FeedConfig(BaseModel):
     # matters: that national feed's shapes.txt is 38M rows / 2.57 GB, and
     # reading it whole OOMed a 20 GiB container (confirmed 2026-09-06).
     gtfs_agency_prefix: str | None = None
+    # Same purpose as gtfs_agency_prefix, for an operator (or small group)
+    # with no shared agency_id prefix to match on -- an exact agency_id set
+    # instead. E.g. TFNSW_SYDNEY_TRAINS (agency_id "x0001") or
+    # TFNSW_LIGHT_RAIL ({"SLR", "PLR", "LR"}) within Transport for NSW's
+    # combined feed (mdb-2449). At most one of gtfs_agency_prefix/
+    # gtfs_agency_ids/gtfs_route_types should be set per feed.
+    gtfs_agency_ids: list[str] | None = None
+    # Same purpose again, keyed by GTFS route_type instead of agency_id -- for
+    # a config agency whose routes span too many distinct agency_ids to
+    # enumerate (e.g. TFNSW_BUSES: route_type 700/712/714 across 644 different
+    # bus-operator agency_ids in mdb-2449 -- listing them individually isn't
+    # practical the way it is for gtfs_agency_ids' five-or-fewer-operator cases).
+    gtfs_route_types: list[int] | None = None
     method: Literal["GET", "POST"] = "GET"
     body: dict | None = None
 

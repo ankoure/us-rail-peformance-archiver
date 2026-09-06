@@ -23,22 +23,32 @@ def load_feed_agency_map(config_path: str | Path) -> dict[str, tuple[str, str | 
     }
 
 
-def load_feed_gtfs_agency_prefix(config_path: str | Path) -> dict[str, str]:
-    """feed_name -> gtfs_agency_prefix, for feeds whose static schedule (the
-    agency-level mdb_feed_id above) covers multiple operators and so needs
-    scoping to just this feed's own one (see FeedConfig.gtfs_agency_prefix
-    and StaticGtfs's docstring). Feeds without one are simply absent from the
-    returned dict -- gtfs.py's `.get(feed)` then reads as "no scoping needed",
-    matching every feed's behavior before this existed.
+def load_feed_gtfs_scope(config_path: str | Path) -> dict[str, dict]:
+    """feed_name -> GtfsResolver.for_date scoping kwargs, for feeds whose
+    static schedule (the agency-level mdb_feed_id above) covers multiple
+    operators and so needs scoping to just this feed's own one (see
+    FeedConfig.gtfs_agency_prefix/gtfs_agency_ids/gtfs_route_types and
+    StaticGtfs's docstring for the three ways a feed can be scoped, and why
+    a single feed only ever needs one of them). Feeds needing none of the
+    three are simply absent from the returned dict -- gtfs.py's
+    `.get(feed, {})` then reads as "no scoping needed", matching every feed's
+    behavior before this existed.
 
     Kept separate from load_feed_agency_map rather than widening its tuple:
     that function's 2-tuple shape is unpacked positionally at several call
-    sites in gold.py, which has no use for this field.
+    sites in gold.py, which has no use for any of this.
     """
     config = load_config(str(config_path))
-    return {
-        feed.name: feed.gtfs_agency_prefix
-        for agency in config.agencies
-        for feed in agency.feeds
-        if feed.gtfs_agency_prefix
-    }
+    scopes: dict[str, dict] = {}
+    for agency in config.agencies:
+        for feed in agency.feeds:
+            scope = {}
+            if feed.gtfs_agency_prefix:
+                scope["agency_prefix"] = feed.gtfs_agency_prefix
+            if feed.gtfs_agency_ids:
+                scope["agency_ids"] = frozenset(feed.gtfs_agency_ids)
+            if feed.gtfs_route_types:
+                scope["route_types"] = frozenset(feed.gtfs_route_types)
+            if scope:
+                scopes[feed.name] = scope
+    return scopes

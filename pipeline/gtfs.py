@@ -113,7 +113,7 @@ from analysis.geo import cumulative_arc_length_m  # noqa: E402
 from analysis.gtfs_fetcher import GtfsResolver, pick_snapshot  # noqa: E402
 from pipeline.agency_map import (  # noqa: E402
     load_feed_agency_map,
-    load_feed_gtfs_agency_prefix,
+    load_feed_gtfs_scope,
 )
 
 load_dotenv()
@@ -745,14 +745,13 @@ def process_feed_day(
     curated_dir: Path,
     force: bool,
     written_versions: set[tuple[str, str]],
-    agency_prefix: str | None = None,
+    gtfs_scope: dict | None = None,
 ) -> dict | None:
     """Build this (feed, day)'s manifest row, and the version marts if new.
 
-    `agency_prefix` scopes a multi-operator static schedule to just this
-    feed's own operator (see FeedConfig.gtfs_agency_prefix and StaticGtfs's
-    docstring) -- None for every feed that doesn't need it, which is most of
-    them.
+    `gtfs_scope` scopes a multi-operator static schedule to just this feed's
+    own operator (see load_feed_gtfs_scope and StaticGtfs's docstring) -- {}
+    for every feed that doesn't need it, which is most of them.
 
     Returns a counts dict, or None when no snapshot covers this day. Raises
     requests.exceptions.RequestException on catalog/zip fetch failure — the
@@ -773,7 +772,7 @@ def process_feed_day(
     }
     already_on_disk = all(p.exists() for p in version_paths.values())
     if key not in written_versions and (force or not already_on_disk):
-        gtfs_day = resolver.for_date(day, agency_prefix=agency_prefix)
+        gtfs_day = resolver.for_date(day, **(gtfs_scope or {}))
         for mart in _VERSION_MARTS:
             mart_rows = _ROW_BUILDERS[mart](gtfs_day, snap.version_slug)
             _write_parquet(mart_rows, _MART_SCHEMAS[mart], version_paths[mart])
@@ -814,7 +813,7 @@ def process_feed_day(
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     feed_agency_map = load_feed_agency_map(args.config)
-    feed_gtfs_agency_prefix = load_feed_gtfs_agency_prefix(args.config)
+    feed_gtfs_scope = load_feed_gtfs_scope(args.config)
     feeds = (
         args.feed
         if args.feed
@@ -879,7 +878,7 @@ def main(argv: list[str] | None = None) -> int:
                         args.curated_dir,
                         args.force,
                         written_versions,
-                        agency_prefix=feed_gtfs_agency_prefix.get(feed),
+                        gtfs_scope=feed_gtfs_scope.get(feed),
                     )
                 except requests.exceptions.RequestException as e:
                     print(

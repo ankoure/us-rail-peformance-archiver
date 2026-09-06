@@ -707,5 +707,70 @@ class TestRouteModes:
         assert gtfs.route_modes == {"R_OK": "rapid", "R_BLANK": "other"}
 
 
+class TestScoping:
+    """The three multi-operator scoping modes (GO_AHEAD/Entur's agency_prefix,
+    TFNSW's agency_ids and route_types) and their cascade from routes into
+    trips/shapes/stop_times. Two synthetic "operators" sharing one zip, same
+    shape every real case takes: AAA (bus, route_type 3) and BBB (rail,
+    route_type 2)."""
+
+    _ROUTES = "route_id,agency_id,route_type\nR1,AAA:1,3\nR2,BBB:1,2\n"
+    _TRIPS = "route_id,trip_id,service_id,shape_id\nR1,T1,S1,SH1\nR2,T2,S1,SH2\n"
+    _SHAPES = (
+        "shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence\n"
+        "SH1,1.0,1.0,0\nSH2,2.0,2.0,0\n"
+    )
+    _STOP_TIMES = (
+        "trip_id,stop_sequence,stop_id,arrival_time,departure_time\n"
+        "T1,1,STOP1,08:00:00,08:00:00\nT2,1,STOP2,09:00:00,09:00:00\n"
+    )
+
+    def _zip(self, tmp_path):
+        return build_gtfs_zip(
+            tmp_path,
+            routes=self._ROUTES,
+            trips=self._TRIPS,
+            shapes=self._SHAPES,
+            stop_times=self._STOP_TIMES,
+        )
+
+    def test_no_scope_sees_both_operators(self, tmp_path):
+        gtfs = StaticGtfs(self._zip(tmp_path))
+        assert set(gtfs.routes["route_id"]) == {"R1", "R2"}
+        assert set(gtfs.trips["trip_id"]) == {"T1", "T2"}
+        assert set(gtfs.shapes["shape_id"]) == {"SH1", "SH2"}
+        assert set(gtfs.stop_times["stop_id"]) == {"STOP1", "STOP2"}
+
+    def test_agency_prefix_scopes_to_one_operator(self, tmp_path):
+        gtfs = StaticGtfs(self._zip(tmp_path), agency_prefix="AAA")
+        assert set(gtfs.routes["route_id"]) == {"R1"}
+        assert set(gtfs.trips["trip_id"]) == {"T1"}
+        assert set(gtfs.shapes["shape_id"]) == {"SH1"}
+        assert set(gtfs.stop_times["stop_id"]) == {"STOP1"}
+
+    def test_agency_ids_scopes_to_exact_set(self, tmp_path):
+        gtfs = StaticGtfs(self._zip(tmp_path), agency_ids=frozenset({"BBB:1"}))
+        assert set(gtfs.routes["route_id"]) == {"R2"}
+        assert set(gtfs.trips["trip_id"]) == {"T2"}
+        assert set(gtfs.shapes["shape_id"]) == {"SH2"}
+        assert set(gtfs.stop_times["stop_id"]) == {"STOP2"}
+
+    def test_route_types_scopes_by_mode(self, tmp_path):
+        # TFNSW_BUSES' actual shape: many agency_ids, one shared route_type.
+        gtfs = StaticGtfs(self._zip(tmp_path), route_types=frozenset({3}))
+        assert set(gtfs.routes["route_id"]) == {"R1"}
+        assert set(gtfs.trips["trip_id"]) == {"T1"}
+        assert set(gtfs.shapes["shape_id"]) == {"SH1"}
+        assert set(gtfs.stop_times["stop_id"]) == {"STOP1"}
+
+    def test_route_types_matches_int_against_csv_strings(self, tmp_path):
+        # route_type comes off disk via pandas' own inference, not our dtype
+        # dict (unlike agency_id) -- confirms the int-vs-parsed-dtype
+        # comparison in `routes` actually works, not just happens to for one
+        # code path.
+        gtfs = StaticGtfs(self._zip(tmp_path), route_types=frozenset({2}))
+        assert set(gtfs.routes["route_id"]) == {"R2"}
+
+
 # pandas import used by TestScheduledStops.test_scheduled_headway_is_per_route_dir_stop
 import pandas as pd  # noqa: E402
