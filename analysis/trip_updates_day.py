@@ -102,20 +102,69 @@ class TripUpdatesDay:
     def visits(self) -> list[Visit]:
         """Synthesized Visits — one per (trip_id, stop_id), latest prediction wins.
 
-        Pipeline is two-stage so the dedup stays in arrow space:
-          1. Read each row group projected to needed columns; rename to
-             internal names; filter junk rows; sort by feed_timestamp desc;
-             group_by (trip_id, stop_id) keeping 'first' — gives one row per
-             key with the largest feed_timestamp inside that row group.
-          2. Concat all partials and repeat the sort+group_by once — collapses
-             duplicates that crossed row-group boundaries.
+        Used to dedupe per row group (filter junk rows, sort by feed_timestamp
+        desc, group_by (trip_id, stop_id) keeping 'first'), then concat ALL of
+        those partials and repeat the same sort+group_by once globally. That
+        assumes stage 1 shrinks the data enough to make stage 2 cheap -- true
+        only when a row group has meaningful internal (trip_id, stop_id)
+        duplication. A dense, frequently-polled feed's row groups are each
+        roughly one poll's worth of stop predictions, and a single poll
+        practically never reports the same (trip, stop) twice -- so stage 1
+        removed almost nothing, and stage 2 had to sort+group_by the WHOLE
+        day's raw poll rows in one single-threaded pass (group_by's 'first'
+        aggregator can't run multi-threaded). Confirmed 2026-09-06 against
+        real data (urban-mobility-center-sofia-traffic-trips): 46.9M raw rows
+        across 2,865 row groups collapsing to just 327K actual visits --
+        stage 2 was processing 150x more rows than it needed to, and peaked
+        at 16+ GiB RSS just to get there.
+
+        Fix: dedupe doesn't need to happen once per (tiny) row group or once
+        globally -- any grouping works, since folding each group's
+        already-deduped per-key winners into a running per-key-winner table is
+        the same answer as one global dedupe (max is associative). The
+        granularity just has to be big enough to actually catch duplicates: a
+        SINGLE poll rarely repeats a key, but a multi-poll BATCH does, because
+        the same (trip, stop) legitimately recurs across many consecutive
+        polls while a vehicle approaches or dwells at that stop. So row groups
+        are accumulated into batches of _MERGE_BATCH_ROWS raw rows before each
+        dedupe, which is what makes each round's arrow-space sort+group_by
+        actually shrink the data the way the old per-row-group stage assumed
+        it would. Peak memory is now bounded by one batch's raw size plus the
+        running per-key-winner table (327K rows here), not the day's total
+        raw poll-row count (46.9M here) -- and because every dedupe here is
+        still an arrow-native, vectorized sort+group_by rather than a Python
+        per-row loop, this is actually FASTER than the original despite doing
+        strictly more dedupe passes: confirmed 2026-09-06 on the same real
+        partition at 46s/16.4 GiB peak (original) vs 28s/1.07 GiB peak
+        (batched) -- the original's single global pass over 46.9M rows cost
+        more than this version's several passes over much smaller batches.
         """
         path = self.partition_path
         files = list_parquet(self._fs, path)
         if not files:
             raise FileNotFoundError(f"No trip_updates partition at {path}")
 
-        partials: list[pa.Table] = []
+        merged: pa.Table | None = None
+        batch: list[pa.Table] = []
+        batch_rows = 0
+
+        def flush() -> None:
+            nonlocal merged, batch, batch_rows
+            if not batch:
+                return
+            deduped = _dedupe_latest_per_key(
+                pa.concat_tables(batch, promote_options="default")
+            )
+            merged = (
+                deduped
+                if merged is None
+                else _dedupe_latest_per_key(
+                    pa.concat_tables([merged, deduped], promote_options="default")
+                )
+            )
+            batch = []
+            batch_rows = 0
+
         for pf_path in files:
             # open_input_file returns a seekable NativeFile on both backends, so
             # the row-group loop below keeps issuing ranged reads rather than
@@ -125,15 +174,17 @@ class TripUpdatesDay:
             for i in range(pf.num_row_groups):
                 rg = pf.read_row_group(i, columns=present)
                 rg = _normalize(rg)
-                partial = _dedupe_latest_per_key(rg)
-                if partial.num_rows > 0:
-                    partials.append(partial)
+                if rg.num_rows == 0:
+                    continue
+                batch.append(rg)
+                batch_rows += rg.num_rows
+                if batch_rows >= _MERGE_BATCH_ROWS:
+                    flush()
+        flush()
 
-        if not partials:
+        if merged is None or merged.num_rows == 0:
             return []
-        combined = pa.concat_tables(partials, promote_options="default")
-        final = _dedupe_latest_per_key(combined)
-        return _table_to_visits(final)
+        return _table_to_visits(merged)
 
     @cached_property
     def vehicles(self) -> list[_StubVehicle]:
@@ -165,6 +216,14 @@ _INTERNAL_COLS: tuple[str, ...] = (
     "vehicle_label",
 )
 _KEY_COLS: tuple[str, str] = ("trip_id", "stop_id")
+# Raw rows accumulated before each intermediate dedupe pass in `visits` (see
+# its docstring). Large enough to span many consecutive polls -- where a
+# (trip_id, stop_id) key legitimately recurs as a vehicle approaches or
+# dwells at a stop -- so each pass actually shrinks the data, not so large
+# that a single pass' own concat+sort+group_by becomes the new bottleneck.
+# Not a measured value; revisit if a feed denser than
+# urban-mobility-center-sofia-traffic-trips (46.9M raw rows/day) shows up.
+_MERGE_BATCH_ROWS = 500_000
 _NULLABLE_TYPES: dict[str, pa.DataType] = {
     "trip_id": pa.string(),
     "stop_id": pa.string(),

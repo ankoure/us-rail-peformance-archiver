@@ -20,10 +20,29 @@
 # gold's dependency on rollup -- see that file's header comment. So of the four,
 # only gtfs is scheduled by a plain, un-ordered cron below.
 #
-# All four exclude local.heavy_agencies for the same reason the main task does:
-# those agencies run their own per-stage tasks in heavy_stages.tf, and running
-# their gtfs/snapshot here too would both duplicate the work and put GO_AHEAD's
-# gtfs step -- the one that SIGKILLs at 8 GiB by itself -- back into a shared envelope.
+# Each excludes only the agencies actually flagged for ITS OWN failure mode
+# (heavy_stages.tf's local.heavy_stage_defs[name].agencies), not the full
+# local.heavy_agencies list -- an agency isolated for gold.py (say,
+# METRO_HOUSTON) has never been a gtfs.py or snapshot.py problem, so it runs
+# gtfs/snapshot right here in the regular pool. Wiring these to
+# heavy_stage_defs directly (rather than copy-pasting the same agency names
+# twice) is what makes the two sides unable to drift apart, same principle as
+# rollup.tf's main_stages being derived from var.stage_schedule_enabled.
+#
+# Regression fixed 2026-09-06, caught before it cost a single night: the
+# first version of this split excluded the FULL heavy_agencies list from all
+# four stages uniformly, then re-included each agency only in its own narrow
+# heavy_stages.tf subset -- so e.g. GO_AHEAD (only ever flagged for gtfs.py)
+# was excluded from stage-gold AND absent from heavy_gold's agency list,
+# meaning its gold mart would never have been built by EITHER task, silently,
+# every night. Same failure class as the GO_AHEAD outage described in
+# rollup.tf's heavy_agencies comment -- excluded from one task without being
+# re-included in the other -- just introduced by this split instead of a
+# schedule left disabled.
+#
+# archive is the one exception: it still excludes the FULL heavy_agencies
+# list, because cold-ship for all eight is handled by heavy_rollup, not by
+# any of the narrower heavy_stages.tf subsets.
 #
 # Sizes below are deliberately generous first guesses, not measured values. Watch
 # pipeline.<stage>.duration and the task memory graphs for a week before cutting
@@ -38,6 +57,7 @@ locals {
       workers   = var.stage_workers
       post      = ""
       silver    = ""
+      exclude   = local.heavy_stage_defs["gtfs"].agencies
       scheduled = true
     }
     # Sequenced by the state machine after nothing (it's the first stage in its
@@ -49,6 +69,7 @@ locals {
       workers   = var.stage_workers
       post      = ""
       silver    = ""
+      exclude   = local.heavy_stage_defs["snapshot"].agencies
       scheduled = false
     }
     # cold-ship + prune. Splitting the archive out means the raw DEEP_ARCHIVE
@@ -72,6 +93,7 @@ locals {
       stages    = "cold-ship"
       workers   = var.stage_workers
       silver    = ""
+      exclude   = local.heavy_agencies
       scheduled = false
       post      = "python pipeline/prune_s3.py --config /tmp/fargate.yaml --keep-days ${var.landing_prune_keep_days} || true"
     }
@@ -92,6 +114,7 @@ locals {
       workers = var.stage_workers
       post    = ""
       silver  = "--silver-dir s3://${var.hot_bucket}"
+      exclude = local.heavy_stage_defs["gold"].agencies
       # Sequenced by the state machine after rollup, not by its own cron.
       scheduled = false
     }
@@ -110,7 +133,7 @@ locals {
       trap 'python pipeline/task_duration.py --config /tmp/fargate.yaml --metric pipeline.stage_${name}.duration --seconds $(( $(date +%s) - START )) || true' EXIT
 
       set +e
-      python pipeline/agency_batch.py --config /tmp/fargate.yaml --day "$DAY" --workers ${def.workers} --stages ${def.stages} ${def.silver} --exclude-agency ${join(" ", local.heavy_agencies)}
+      python pipeline/agency_batch.py --config /tmp/fargate.yaml --day "$DAY" --workers ${def.workers} --stages ${def.stages} ${def.silver} --exclude-agency ${join(" ", def.exclude)}
       AGENCY_STATUS=$?
       set -e
       if [ "$AGENCY_STATUS" -ne 0 ]; then

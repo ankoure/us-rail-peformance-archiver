@@ -52,6 +52,57 @@ def _write_parquet(base_dir: Path, rows: list[dict]) -> Path:
     return part_dir
 
 
+def _write_parquet_multi_group(base_dir: Path, row_groups: list[list[dict]]) -> Path:
+    """Like _write_parquet, but each inner list becomes its OWN row group --
+    for exercising the cross-row-group merge path directly (a single
+    pq.write_table call always produces one row group for data this small)."""
+    part_dir = (
+        base_dir
+        / "trip_updates"
+        / f"feed={FEED}"
+        / f"year={DATE.year}"
+        / f"month={DATE.month}"
+        / f"day={DATE.day}"
+    )
+    part_dir.mkdir(parents=True, exist_ok=True)
+    schema_cols = [
+        "trip_update.trip.trip_id",
+        "trip_update.trip.route_id",
+        "trip_update.trip.direction_id",
+        "trip_update.stop_time_update.stop_id",
+        "trip_update.stop_time_update.stop_sequence",
+        "trip_update.stop_time_update.arrival.time",
+        "trip_update.stop_time_update.departure.time",
+        "feed_timestamp",
+        "trip_update.stop_time_update.schedule_relationship",
+        "trip_update.vehicle.id",
+        "trip_update.vehicle.label",
+    ]
+    path = part_dir / "data.parquet"
+    with pq.ParquetWriter(
+        path,
+        pa.schema(
+            [
+                (c, pa.string())
+                if c
+                not in {
+                    "trip_update.trip.direction_id",
+                    "trip_update.stop_time_update.stop_sequence",
+                    "trip_update.stop_time_update.arrival.time",
+                    "trip_update.stop_time_update.departure.time",
+                    "feed_timestamp",
+                }
+                else (c, pa.int64())
+                for c in schema_cols
+            ]
+        ),
+    ) as writer:
+        for rows in row_groups:
+            cols = {c: [r.get(c) for r in rows] for c in schema_cols}
+            writer.write_table(pa.table(cols, schema=writer.schema))
+    return part_dir
+
+
 def _row(
     *,
     trip_id: str = "T1",
@@ -195,6 +246,66 @@ class TestVehiclesGrouping:
         assert set(by_vid) == {"V1", "V2"}
         assert len(by_vid["V1"]) == 2
         assert len(by_vid["V2"]) == 1
+
+
+class TestCrossRowGroupMerge:
+    def test_later_row_group_wins_same_key(self, tmp_path):
+        """Same (trip, stop) key split across two SEPARATE row groups --
+        exercises the incremental per-key merge directly (2026-09-06 rewrite
+        replaced a single global concat+dedupe with folding each row group's
+        already-deduped winner into a running dict; this is the case that
+        distinguishes the two: a key whose winning row is in a DIFFERENT
+        row group than where it's first seen)."""
+        _write_parquet_multi_group(
+            tmp_path,
+            [
+                [_row(feed_timestamp=1000, departure_time=995)],
+                [_row(feed_timestamp=2000, departure_time=1998)],
+                [_row(feed_timestamp=1500, departure_time=1495)],  # older, mid-stream
+            ],
+        )
+        day = TripUpdatesDay(FEED, DATE, base_dir=tmp_path)
+        assert len(day.visits) == 1
+        assert day.visits[0].departure_ts == 1998
+
+    def test_same_key_wins_across_separate_merge_batches(self, tmp_path, monkeypatch):
+        """Same as above, but small enough real data (a handful of rows)
+        would normally all land in ONE batch before the first flush --
+        forcing _MERGE_BATCH_ROWS down to 1 row makes every row group its own
+        batch, so this actually exercises the `merged is not None` branch of
+        `visits`'s flush() (merging the running per-key-winner table against
+        a NEW batch's dedupe result), not just one batch's own internal
+        concat+dedupe."""
+        import analysis.trip_updates_day as tud
+
+        monkeypatch.setattr(tud, "_MERGE_BATCH_ROWS", 1)
+        _write_parquet_multi_group(
+            tmp_path,
+            [
+                [_row(feed_timestamp=1000, departure_time=995)],
+                [_row(feed_timestamp=2000, departure_time=1998)],
+                [_row(feed_timestamp=1500, departure_time=1495)],  # older, mid-stream
+            ],
+        )
+        day = TripUpdatesDay(FEED, DATE, base_dir=tmp_path)
+        assert len(day.visits) == 1
+        assert day.visits[0].departure_ts == 1998
+
+    def test_distinct_keys_across_row_groups_all_survive(self, tmp_path):
+        _write_parquet_multi_group(
+            tmp_path,
+            [
+                [_row(trip_id="T1", stop_id="S1")],
+                [_row(trip_id="T2", stop_id="S2")],
+                [_row(trip_id="T3", stop_id="S3")],
+            ],
+        )
+        day = TripUpdatesDay(FEED, DATE, base_dir=tmp_path)
+        assert {(v.trip_id, v.stop_id) for v in day.visits} == {
+            ("T1", "S1"),
+            ("T2", "S2"),
+            ("T3", "S3"),
+        }
 
 
 class TestMissingPartition:
