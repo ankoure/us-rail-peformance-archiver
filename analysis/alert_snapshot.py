@@ -41,30 +41,58 @@ def build_alert_snapshot(feed: Feed, day: date, source: Source) -> dict:
     Raw .bin files aren't one-poll-per-file — legacy files are, but
     BatchingWriter/hourly-merged files are framed batches of many polls.
     archiver.payloads.iter_payloads unpacks whichever shape a file is; neither
-    Source implementation guarantees iter_bins order, so the unpacked
-    (payload, fetched_at) pairs are explicitly re-sorted by fetched_at before
-    folding — order is load-bearing here for last-write-wins correctness.
+    Source implementation guarantees iter_bins order, so fetched_at is load-
+    bearing for last-write-wins correctness and every poll must be resolvable
+    before folding.
+
+    That resolution doesn't require holding onto a whole day of raw payload
+    bytes, though -- a combined feed (BKK/EDMONTON_TRANSIT_SYSTEM/
+    LONDON_TRANSIT_COMMISSION/VBB all serve alerts+trip_updates+vehicle_
+    positions from one endpoint) has FAR more trip/vehicle entities than
+    alert ones per poll, and it's only the alert entities this function
+    needs. So each payload is parsed and reduced to (fetched_at, its alert
+    entities as small dicts, its header as a dict) immediately, before moving
+    to the next one -- the raw bytes and the full decoded FeedMessage (every
+    trip_update/vehicle_position in it) are both freed right away rather than
+    accumulating for the whole day. Confirmed 2026-09-06: this was 13 GB/day
+    of raw payloads alone for bkk-trips, SIGKILLing every heavy_snapshot run
+    at the old rollup_heavy's 20 GiB ceiling even running BKK/EDMONTON/LTC/VBB
+    completely alone -- the 38M-row Entur shapes.txt fix (gtfs.py) that
+    prompted this same investigation was a different mechanism (one huge
+    static file) but the same class of bug: buffering data this function
+    never actually needed to hold onto all at once.
     """
     digest_ts = digest_timestamps(source, feed.name, day)
-    polls: list[tuple[bytes, int]] = []
+
+    # One tuple per poll: (fetched_at, this poll's alert entities as small
+    # (id, dict) pairs, this poll's header as a dict). Deliberately NOT the
+    # raw payload or the full decoded FeedMessage -- see the docstring.
+    parsed: list[tuple[int, list[tuple[str, dict]], dict]] = []
     for name, blob in source.iter_bins(feed.name, day):
-        polls.extend(iter_payloads(name, blob, digest_ts))
-    polls.sort(key=lambda poll: poll[1])
+        for payload, fetched_at in iter_payloads(name, blob, digest_ts):
+            try:
+                feed_message = feed.parser.parse(payload)
+            except ParseFailure:
+                continue
+            poll_alerts = [
+                (
+                    entity.id,
+                    MessageToDict(entity.alert, preserving_proto_field_name=True),
+                )
+                for entity in feed_message.entity
+                if entity.HasField("alert")
+            ]
+            header = MessageToDict(
+                feed_message.header, preserving_proto_field_name=True
+            )
+            parsed.append((fetched_at, poll_alerts, header))
+    parsed.sort(key=lambda poll: poll[0])
 
     alerts: dict[str, dict] = {}
     last_header: dict | None = None
 
-    for payload, fetched_at in polls:
-        try:
-            feed_message = feed.parser.parse(payload)
-        except ParseFailure:
-            continue
-
-        for entity in feed_message.entity:
-            if not entity.HasField("alert"):
-                continue
-            alert_id = entity.id
-            alert_dict = MessageToDict(entity.alert, preserving_proto_field_name=True)
+    for fetched_at, poll_alerts, header in parsed:
+        for alert_id, alert_dict in poll_alerts:
             existing = alerts.get(alert_id)
             if existing is None:
                 alerts[alert_id] = {
@@ -77,10 +105,7 @@ def build_alert_snapshot(feed: Feed, day: date, source: Source) -> dict:
                 existing["alert"] = alert_dict
                 existing["last_seen"] = fetched_at
                 existing["poll_count"] += 1
-
-        last_header = MessageToDict(
-            feed_message.header, preserving_proto_field_name=True
-        )
+        last_header = header
 
     return {
         "feed": feed.name,
