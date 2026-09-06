@@ -189,6 +189,73 @@ locals {
               }
             }
           },
+          # Third branch, 2026-09-05: local.heavy_agencies' rollup -> gold edge
+          # (heavy_stages.tf), the same real dependency as the first branch's
+          # Rollup -> Gold, just for the agencies isolated out of that task.
+          # heavy_gtfs and heavy_snapshot have no such dependency (same
+          # reasoning as the regular gtfs/snapshot stages) so they stay on
+          # plain crons in heavy_stages.tf rather than living here.
+          {
+            StartAt = "HeavyRollup"
+            States = {
+              HeavyRollup = {
+                Type     = "Task"
+                Resource = "arn:aws:states:::ecs:runTask.sync"
+                Parameters = {
+                  Cluster        = aws_ecs_cluster.main.arn
+                  TaskDefinition = aws_ecs_task_definition.heavy_stage["rollup"].arn
+                  LaunchType     = "FARGATE"
+                  NetworkConfiguration = {
+                    AwsvpcConfiguration = {
+                      Subnets        = data.aws_subnets.default.ids
+                      SecurityGroups = [aws_security_group.rollup.id]
+                      AssignPublicIp = "ENABLED"
+                    }
+                  }
+                  Overrides = {
+                    ContainerOverrides = [{
+                      Name            = "heavy-rollup"
+                      "Environment.$" = "States.Array(States.StringToJson(States.Format('{{\"Name\":\"ROLLUP_DAY\",\"Value\":\"{}\"}}', $.day)))"
+                    }]
+                  }
+                }
+                ResultPath = null
+
+                # Same reasoning as the regular branch's Rollup Catch: a
+                # heavy agency's rollup failure must not also cost heavy_gold
+                # a chance to run for the OTHER heavy agencies.
+                Catch = [{
+                  ErrorEquals = ["States.ALL"]
+                  Next        = "HeavyGold"
+                  ResultPath  = "$.heavyRollupError"
+                }]
+                Next = "HeavyGold"
+              }
+              HeavyGold = {
+                Type     = "Task"
+                Resource = "arn:aws:states:::ecs:runTask.sync"
+                Parameters = {
+                  Cluster        = aws_ecs_cluster.main.arn
+                  TaskDefinition = aws_ecs_task_definition.heavy_stage["gold"].arn
+                  LaunchType     = "FARGATE"
+                  NetworkConfiguration = {
+                    AwsvpcConfiguration = {
+                      Subnets        = data.aws_subnets.default.ids
+                      SecurityGroups = [aws_security_group.rollup.id]
+                      AssignPublicIp = "ENABLED"
+                    }
+                  }
+                  Overrides = {
+                    ContainerOverrides = [{
+                      Name            = "heavy-gold"
+                      "Environment.$" = "States.Array(States.StringToJson(States.Format('{{\"Name\":\"ROLLUP_DAY\",\"Value\":\"{}\"}}', $.day)))"
+                    }]
+                  }
+                }
+                End = true
+              }
+            }
+          },
         ]
         End = true
       }
@@ -226,6 +293,10 @@ resource "aws_iam_role_policy" "sfn" {
           "${aws_ecs_task_definition.stage["gold"].arn_without_revision}:*",
           "${aws_ecs_task_definition.stage["snapshot"].arn_without_revision}:*",
           "${aws_ecs_task_definition.stage["archive"].arn_without_revision}:*",
+          # heavy_stages.tf's third branch (HeavyRollup -> HeavyGold), added
+          # 2026-09-05 alongside heavy_stage.
+          "${aws_ecs_task_definition.heavy_stage["rollup"].arn_without_revision}:*",
+          "${aws_ecs_task_definition.heavy_stage["gold"].arn_without_revision}:*",
         ]
       },
       {

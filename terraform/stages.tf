@@ -21,9 +21,9 @@
 # only gtfs is scheduled by a plain, un-ordered cron below.
 #
 # All four exclude local.heavy_agencies for the same reason the main task does:
-# those agencies run their whole chain alone in rollup_heavy, and running their
-# gtfs/snapshot here too would both duplicate the work and put GO_AHEAD's gtfs
-# step -- the one that SIGKILLs at 8 GiB by itself -- back into a shared envelope.
+# those agencies run their own per-stage tasks in heavy_stages.tf, and running
+# their gtfs/snapshot here too would both duplicate the work and put GO_AHEAD's
+# gtfs step -- the one that SIGKILLs at 8 GiB by itself -- back into a shared envelope.
 #
 # Sizes below are deliberately generous first guesses, not measured values. Watch
 # pipeline.<stage>.duration and the task memory graphs for a week before cutting
@@ -220,10 +220,10 @@ resource "aws_scheduler_schedule" "stage" {
       task_definition_arn = aws_ecs_task_definition.stage[each.key].arn
       task_count          = 1
       tags                = { trigger = "scheduled" }
-      # On-demand FARGATE, not Spot: same reasoning as the main rollup and
-      # rollup_heavy -- these process a day's data and must complete. The
-      # archive stage especially: a Spot reclaim mid-run means landing days
-      # that never reach cold.
+      # On-demand FARGATE, not Spot: same reasoning as the main rollup and the
+      # heavy_stages.tf tasks -- these process a day's data and must complete.
+      # The archive stage especially: a Spot reclaim mid-run means landing
+      # days that never reach cold.
       launch_type = "FARGATE"
 
       network_configuration {

@@ -140,52 +140,100 @@ variable "rollup_memory" {
   description = "Fargate task memory (MiB) for the rollup stage (excludes local.heavy_agencies, see rollup_heavy_memory)."
 }
 
-variable "rollup_heavy_cpu" {
+# --- Heavy-agency stages (heavy_stages.tf) --------------------------------- #
+# Replaced the single rollup_heavy task on 2026-09-05. That task ran the WHOLE
+# chain (cold-ship/rollup/gtfs/gold/snapshot/hot-ship) for all of
+# local.heavy_agencies under ONE memory ceiling (20 GiB), even though the
+# actual SIGKILLs only ever came from gtfs.py (GO_AHEAD) or snapshot.py/gold.py
+# for the other seven -- decode + cold-ship + hot-ship has never OOMed for any
+# of them. Paying 20 GiB for the whole run to cover a failure mode that only
+# ever hit one stage was the thing being fixed: splitting by STAGE (like
+# stages.tf already does for the non-heavy fleet) means each ceiling is sized
+# to the failure it actually covers, not the worst case of all of them at once.
+#
+# heavy_rollup runs all 8 agencies (cheap, unlike the other three below).
+# heavy_gtfs is GO_AHEAD only. heavy_snapshot is
+# BKK/EDMONTON_TRANSIT_SYSTEM/LONDON_TRANSIT_COMMISSION/VBB. heavy_gold is
+# METRO_HOUSTON/CINCINNATI_METRO/URBAN_MOBILITY_CENTER_SOFIA_TRAFFIC -- see
+# heavy_stages.tf's local.heavy_stage_defs for the exact split.
+
+variable "heavy_rollup_cpu" {
   type        = string
-  default     = "4096" # 4 vCPU -- bumped alongside rollup_heavy_memory below (Fargate pairs cpu/memory ranges)
-  description = "Fargate task CPU units for the rollup_heavy stage (the agencies split out of the main rollup task for OOM isolation)."
+  default     = "2048" # 2 vCPU
+  description = "Fargate CPU units for the heavy-agency rollup stage (decode + cold-ship + hot-ship for all 8 heavy agencies)."
 }
 
-variable "rollup_heavy_memory" {
-  type = string
-  # 8 GiB was a guess (see git history) and wrong: verified 2026-08-20 via a
-  # manual run-task that GO_AHEAD SIGKILLs in pipeline/gtfs.py at 8 GiB even
-  # running ALONE with --workers 1 -- so this was never a concurrency/
-  # contention problem, GO_AHEAD's gtfs.py step genuinely needs more than
-  # 8 GiB by itself. Bumped straight to 20 GiB (matching the old shared
-  # rollup_memory ceiling, now dedicated to just this one agency) rather than
-  # guess again -- right-size down later with real peak data if it turns out
-  # to be overkill.
-  default     = "20480"
-  description = "Fargate task memory (MiB) for the rollup_heavy stage."
-}
-
-variable "rollup_heavy_schedule_enabled" {
-  type = bool
-  # Flipped to true 2026-09-03. It had been left at false since the
-  # local.heavy_agencies split was applied on ~2026-08-20, which is exactly the
-  # trap the IMPORTANT note below warns about: GO_AHEAD was excluded from the
-  # main task by an applied --exclude-agency while its own schedule never ran,
-  # so it was processed by NEITHER task for two weeks and has no cold tarball
-  # from that entire period. Verify with a manual run-task if you like, but do
-  # not apply an expanded heavy_agencies list with this still false.
-  default     = true
+variable "heavy_rollup_memory" {
+  type        = string
+  default     = "8192" # 8 GiB
   description = <<-EOT
-    Whether the daily EventBridge schedule for the rollup_heavy task is
-    ENABLED.
-
-    IMPORTANT: the main rollup task's --exclude-agency is unconditional (not
-    gated by this var) -- once applied, local.heavy_agencies stop being
-    processed by the main task regardless of whether this schedule is on.
-    Don't leave this disabled for long after that apply, or those agencies
-    silently get skipped by BOTH tasks with no rollup/gold/ship output at all.
+    Fargate memory (MiB) for the heavy-agency rollup stage. Decode/cold-ship/
+    hot-ship has never been the SIGKILL source for any heavy agency (only
+    gtfs.py and snapshot.py/gold.py have) -- this is a generous first guess for
+    8 agencies run at heavy_stage_workers concurrency, not the 20 GiB the old
+    combined rollup_heavy task carried for every stage regardless of need.
   EOT
 }
 
-variable "rollup_heavy_schedule_expression" {
+variable "heavy_gtfs_cpu" {
   type        = string
-  default     = "cron(30 3 * * ? *)" # same slot as the main rollup -- independent tasks, no shared disk, safe to run concurrently
-  description = "EventBridge Scheduler expression (UTC) for the daily rollup_heavy task."
+  default     = "4096" # 4 vCPU -- paired tier for 20480 MiB (Fargate pairs cpu/memory ranges)
+  description = "Fargate CPU units for the heavy-agency gtfs stage (GO_AHEAD only)."
+}
+
+variable "heavy_gtfs_memory" {
+  type = string
+  # First deploy of this task (2026-09-05) tried 16384 (stage_gtfs_memory's
+  # ceiling, sized for the OTHER ~190 agencies) and GO_AHEAD OOMed the
+  # container outright -- "OutOfMemoryError: container killed due to memory
+  # usage", not a subprocess SIGKILL agency_batch could isolate. Went straight
+  # to 20480 instead of guessing again: verified 2026-08-20 (see the old
+  # rollup_heavy_memory var this replaces) that GO_AHEAD needs >8 GiB in
+  # gtfs.py running ALONE, and 20 GiB was the ceiling that actually worked for
+  # it in that combined task. Same number, now dedicated to gtfs alone instead
+  # of shared with cold-ship/rollup/hot-ship in the same run.
+  default     = "20480"
+  description = "Fargate memory (MiB) for the heavy-agency gtfs stage (GO_AHEAD only)."
+}
+
+variable "heavy_snapshot_cpu" {
+  type        = string
+  default     = "4096" # 4 vCPU -- paired tier for 20480 MiB (Fargate pairs cpu/memory ranges)
+  description = "Fargate CPU units for the heavy-agency snapshot stage (BKK/EDMONTON_TRANSIT_SYSTEM/LONDON_TRANSIT_COMMISSION/VBB)."
+}
+
+variable "heavy_snapshot_memory" {
+  type        = string
+  default     = "20480" # 20 GiB
+  description = <<-EOT
+    Fargate memory (MiB) for the heavy-agency snapshot stage.
+    analysis.alert_snapshot.build_alert_snapshot buffers a whole day of raw
+    payloads in one list -- BKK alone is ~13 GB/day of raw on bkk-trips. Matches
+    the old rollup_heavy ceiling, now dedicated to snapshot alone instead of
+    shared with gtfs/gold/rollup in the same run.
+  EOT
+}
+
+variable "heavy_gold_cpu" {
+  type        = string
+  default     = "4096" # 4 vCPU -- paired tier for 24576 MiB
+  description = "Fargate CPU units for the heavy-agency gold stage (METRO_HOUSTON/CINCINNATI_METRO/URBAN_MOBILITY_CENTER_SOFIA_TRAFFIC)."
+}
+
+variable "heavy_gold_memory" {
+  type        = string
+  default     = "24576" # 24 GiB
+  description = <<-EOT
+    Fargate memory (MiB) for the heavy-agency gold stage. Matches
+    stage_gold_memory exactly -- same failure mode (gold.py), same reasoning:
+    24 GiB here costs nothing on the other heavy stages' ceilings.
+  EOT
+}
+
+variable "heavy_stage_workers" {
+  type        = number
+  default     = 4
+  description = "Agencies processed concurrently within the heavy_rollup stage only (the other three heavy stages stay --workers 1, same isolation reasoning as the old rollup_heavy)."
 }
 
 # --- Per-stage tasks (stages.tf) ------------------------------------------ #

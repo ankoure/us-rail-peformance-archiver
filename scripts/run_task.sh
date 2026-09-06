@@ -11,58 +11,49 @@
 # never drift from what's actually deployed.
 #
 # Usage:
-#   scripts/run_task.sh <task-family> [--day YYYY-MM-DD] [--stages "S1 S2"] \
-#       [--spot] [--profile PROFILE]
+#   scripts/run_task.sh <task-family> [--day YYYY-MM-DD] [--spot] [--profile PROFILE]
 #
 # --day sets ROLLUP_DAY on the task's main container, which is how every
 # agency_batch-driven task targets a past day instead of its default
 # `${ROLLUP_DAY:-$(date -u -d yesterday +%F)}` (terraform/rollup.tf,
-# terraform/stages.tf). Re-runs are safe: ship.py skips any object already in
-# S3 unless --force, so a day that only partly shipped fills in its gaps.
+# terraform/stages.tf, terraform/heavy_stages.tf). Re-runs are safe: ship.py
+# skips any object already in S3 unless --force, so a day that only partly
+# shipped fills in its gaps.
 #
-# --stages sets ROLLUP_STAGES, narrowing agency_batch to part of the chain.
-# Only rail-archiver-rollup-heavy reads it today; the per-stage tasks are
-# already single-stage by construction (terraform/stages.tf).
+# Every agency_batch-driven task is single-stage (or a fixed sub-chain) by
+# construction now -- there is no longer a task that reads a stages override
+# at runtime (rollup_heavy, retired 2026-09-05, was the last one).
 #
 # Examples:
 #   scripts/run_task.sh rail-archiver-rollup --profile KourePowerUser
-#   scripts/run_task.sh rail-archiver-rollup-heavy --day 2026-08-27 --profile KourePowerUser
-#   scripts/run_task.sh rail-archiver-rollup-heavy --day 2026-08-27 \
-#       --stages "cold-ship rollup hot-ship" --profile KourePowerUser
+#   scripts/run_task.sh rail-archiver-heavy-gold --day 2026-08-27 --profile KourePowerUser
+#   scripts/run_task.sh rail-archiver-stage-gold --day 2026-09-04 --profile KourePowerUser
 #   scripts/run_task.sh rail-archiver-historic-511-otp --spot --profile KourePowerUser
 #
 # Task families (see terraform/*.tf): rail-archiver-rollup,
-# rail-archiver-cert-check, rail-archiver-s3-storage-metrics,
-# rail-archiver-historic-511, rail-archiver-historic-511-otp,
-# rail-archiver-gold-backfill.
+# rail-archiver-stage-{gtfs,snapshot,archive,gold},
+# rail-archiver-heavy-{rollup,gtfs,snapshot,gold}, rail-archiver-cert-check,
+# rail-archiver-s3-storage-metrics, rail-archiver-historic-511,
+# rail-archiver-historic-511-otp, rail-archiver-gold-backfill.
 
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "usage: $0 <task-family> [--day YYYY-MM-DD] [--stages \"S1 S2\"] [--spot] [--profile PROFILE]" >&2
+  echo "usage: $0 <task-family> [--day YYYY-MM-DD] [--spot] [--profile PROFILE]" >&2
   exit 1
 fi
 
 task_family="$1"
 shift
 
-# Canonical stage names, mirroring agency_batch.py's STAGES. Validated here so a
-# typo fails in a second instead of after a task has spun up and exited 2.
-readonly VALID_STAGES=(cold-ship rollup gtfs gold snapshot hot-ship)
-
 spot=false
 day=""
-stages=""
 profile_args=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --day)
       day="$2"
-      shift 2
-      ;;
-    --stages)
-      stages="$2"
       shift 2
       ;;
     --spot)
@@ -101,19 +92,9 @@ if [[ -n "$day" ]]; then
   add_env ROLLUP_DAY "$day"
 fi
 
-if [[ -n "$stages" ]]; then
-  for stage in $stages; do
-    [[ " ${VALID_STAGES[*]} " == *" $stage "* ]] || {
-      echo "unknown stage: $stage (valid: ${VALID_STAGES[*]})" >&2
-      exit 1
-    }
-  done
-  add_env ROLLUP_STAGES "$stages"
-fi
-
 # The container to override is the task's own, not the datadog-agent sidecar.
 # Names are set in the task definitions and follow the family minus its
-# "rail-archiver-" prefix (rollup, rollup-heavy, stage-gold, ...).
+# "rail-archiver-" prefix (rollup, stage-gold, heavy-gold, ...).
 override_args=()
 if [[ "$env_json" != "[]" ]]; then
   container="${task_family#rail-archiver-}"

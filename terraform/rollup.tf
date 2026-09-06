@@ -58,8 +58,8 @@ resource "aws_cloudwatch_log_group" "rollup" {
 # defaults to yesterday-UTC. This task also prunes the S3 landing at the end of
 # its script (2026-09-03): the blind lifecycle rule that used to do it was
 # deleting days that had never been shipped -- see landing.tf. Only THIS task
-# prunes; rollup_heavy must not, since prune_s3 sweeps the whole bucket and the
-# two run in the same 03:30Z slot.
+# prunes; none of the heavy-agency tasks (heavy_stages.tf) may, since prune_s3
+# sweeps the whole bucket and they all run in the same 03:30Z slot.
 #
 # NOTE: this WAS split into three separate ECS tasks (rollup/gold/ship) chained
 # by Step Functions, on the theory that a failed stage shouldn't silently
@@ -71,35 +71,37 @@ resource "aws_cloudwatch_log_group" "rollup" {
 # saw an empty curated/ and silently no-op'd every feed. Revisit the split
 # once one of those is in place.
 locals {
-  # Agencies pulled out of the main rollup task into rollup_heavy, below, so
-  # they get their own memory ceiling instead of competing with 3 concurrent
-  # siblings for the main task's rollup_memory. This is a split by AGENCY,
-  # not by pipeline STAGE -- each task still runs the full per-agency
-  # rollup->gtfs->gold->ship chain against its own ephemeral disk, so the
-  # shared-local-disk problem that killed the earlier Step Functions
-  # stage-split (see the NOTE above) doesn't apply here.
+  # Agencies pulled out of the main rollup task so they get their own memory
+  # ceiling instead of competing with 3 concurrent siblings for the main
+  # task's rollup_memory.
   #
   # Expanded 2026-09-03 from just GO_AHEAD to every agency with a SIGKILL in the
   # preceding month. A log sweep of /ecs/rail-archiver-rollup found 42 exit -9
   # kills, and all of them belong to the seven agencies added here (25 in
   # snapshot.py, 17 in gold.py); the other ~197 agencies contributed none. The
-  # main task therefore stops containing any known hog, and each of these runs
-  # alone (rollup_heavy passes --workers 1) against rollup_heavy_memory instead
-  # of competing 4-way for the main task's ceiling.
+  # main task therefore stops containing any known hog.
   #
-  # This is the isolation axis the failure data actually supports. A split by
-  # pipeline STAGE would not help: each agency here fails at the SAME step every
-  # night (BKK/EDMONTON/LTC/VBB in snapshot, HOUSTON/CINCINNATI/SOFIA in gold),
-  # so it's intrinsic per-agency appetite, and putting all 204 golds in one task
-  # would concentrate the hogs rather than separate them.
+  # Until 2026-09-05 these agencies ran their whole chain in ONE task
+  # (rollup_heavy) under one memory ceiling, on the theory that a split by
+  # pipeline STAGE wouldn't help since each agency here fails at the SAME step
+  # every night (BKK/EDMONTON/LTC/VBB in snapshot, HOUSTON/CINCINNATI/SOFIA in
+  # gold) -- but that reasoning conflated two different splits. Putting all
+  # 204 golds in ONE task would indeed concentrate the hogs; isolating just
+  # these three INTO THEIR OWN stage-scoped task does not, and decode/
+  # cold-ship/hot-ship has never been the SIGKILL source for ANY of the eight
+  # -- only gtfs.py (GO_AHEAD) and snapshot.py/gold.py (the rest) have. Paying
+  # one 20 GiB ceiling for every stage of every heavy agency's run, every
+  # night, to cover a failure mode that only ever hit one stage at a time was
+  # the actual waste. See heavy_stages.tf for the per-stage replacement
+  # (heavy_rollup/heavy_gtfs/heavy_snapshot/heavy_gold), each sized to the
+  # failure it actually covers.
   #
   # CAVEAT on the four snapshot victims: until the 2026-09-03 archive-first
   # reorder, snapshot was step 1 and run_agency fail-fasts, so on the nights they
   # died their rollup/gtfs/gold never executed at all -- "rollup never OOMed" is
-  # partly just "rollup never ran". Now that snapshot runs last, those four will
-  # attempt the full chain every night for the first time, which is MORE memory
-  # in flight, not less. That's the main reason they're here now rather than
-  # waiting for them to OOM again.
+  # partly just "rollup never ran". Now that snapshot runs last (and, as of
+  # heavy_stages.tf, in its own task), those four attempt every stage for the
+  # first time, which is MORE memory in flight per stage, not less.
   heavy_agencies = [
     "GO_AHEAD",                            # SIGKILL in gtfs.py at 8 GiB even alone (2026-08-20)
     "BKK",                                 # snapshot.py, 13 GB/day of raw on bkk-trips alone
@@ -121,11 +123,16 @@ locals {
   # cold-ship moves to the archive stage, which is a strict improvement on the
   # 2026-09-03 archive-first reorder: the raw tarball stops being downstream of
   # anything at all, rather than merely being first in a chain that could still
-  # die before reaching it. gold stays with rollup until phase 2 teaches it to
-  # read silver from the hot bucket instead of shared local disk.
+  # die before reaching it. gold moves to its own stage now that it reads
+  # silver from the hot bucket (analysis/curated_fs.py, verified 2026-09-05)
+  # instead of shared local disk -- phase 2 landed, so it drops out of
+  # main_stages the same apply gold's own S3 read path went live. (Before this
+  # fix, main_stages left "gold" in here too, so the state machine's own Gold
+  # step -- stage_orchestration.tf -- ran the SAME agencies' gold a SECOND
+  # time every night: once here reading local disk, once there reading S3.)
   main_stages = (
     var.stage_schedule_enabled
-    ? "rollup gold"
+    ? "rollup"
     : "cold-ship rollup gtfs gold snapshot hot-ship"
   )
 
@@ -291,117 +298,3 @@ resource "aws_ecs_task_definition" "rollup" {
   ])
 }
 
-# --- rollup_heavy: local.heavy_agencies, isolated for their own memory ---- #
-# Same per-agency rollup->gtfs->gold->ship chain as the main task (via the
-# same agency_batch.py, just --agency-scoped instead of --exclude-agency'd),
-# reusing the main task's execution/task roles since it needs identical S3 +
-# secrets access. --workers 1: with only a handful of agencies here, there's
-# no reason to let them compete for memory concurrently the same way that got
-# GO_AHEAD SIGKILLed in the main task in the first place.
-
-resource "aws_cloudwatch_log_group" "rollup_heavy" {
-  name              = "/ecs/rail-archiver-rollup-heavy"
-  retention_in_days = var.log_retention_days
-}
-
-locals {
-  rollup_heavy_script = <<-EOT
-    set -e
-    DAY="$${ROLLUP_DAY:-$(date -u -d yesterday +%F)}"
-    # Overridable per run for the same reason ROLLUP_DAY is: a recovery run for
-    # a past day often wants only the stages that read LANDING (cold-ship,
-    # rollup, snapshot), because landing is the input that expires --
-    # gold is rebuildable from shipped silver at any time via
-    # pipeline/gold_backfill.py, and gtfs marts are version-partitioned, not
-    # day-partitioned. Skipping the memory-hungry stages also keeps a backfill
-    # of these agencies well clear of the SIGKILLs that made the day need
-    # recovering (see local.heavy_agencies). Default is the full chain, which is
-    # exactly what --include-gtfs --include-snapshot resolved to before.
-    STAGES="$${ROLLUP_STAGES:-cold-ship rollup gtfs gold snapshot hot-ship}"
-    echo "rollup_heavy day: $DAY, stages: $STAGES, agencies: ${join(" ", local.heavy_agencies)}"
-    python -c 'import os, yaml; c = yaml.safe_load(open("config/feeds.yaml")); c["writer"]["rollup_source"] = "s3"; c["s3"]["hot_bucket"] = os.environ["HOT_BUCKET"]; c["telemetry"]["enabled"] = True; c["telemetry"]["agent_host"] = "127.0.0.1"; c["telemetry"]["env"] = "prod"; yaml.safe_dump(c, open("/tmp/fargate.yaml", "w"))'
-    START=$(date +%s)
-    trap 'python pipeline/task_duration.py --config /tmp/fargate.yaml --metric pipeline.rollup_heavy.duration --seconds $(( $(date +%s) - START )) || true' EXIT
-
-    set +e
-    # $STAGES unquoted on purpose (word-split into separate argv entries);
-    # --agency stays last since both it and --stages are nargs="+".
-    python pipeline/agency_batch.py --config /tmp/fargate.yaml --day "$DAY" --workers 1 --stages $STAGES --agency ${join(" ", local.heavy_agencies)}
-    AGENCY_STATUS=$?
-    set -e
-    if [ "$AGENCY_STATUS" -ne 0 ]; then
-      echo "agency_batch (heavy): one or more agencies failed for $DAY -- see per-agency log lines above" >&2
-    fi
-    sleep 15
-    exit "$AGENCY_STATUS"
-  EOT
-}
-
-resource "aws_ecs_task_definition" "rollup_heavy" {
-  family                   = "rail-archiver-rollup-heavy"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = var.rollup_heavy_cpu
-  memory                   = var.rollup_heavy_memory
-  execution_role_arn       = aws_iam_role.rollup_execution.arn
-  task_role_arn            = aws_iam_role.rollup_task.arn
-
-  runtime_platform {
-    operating_system_family = "LINUX"
-    cpu_architecture        = "X86_64"
-  }
-
-  # No explicit block -- Fargate's unconfigured 20 GiB default is already
-  # generous for the handful of agencies here vs. the main task's 40 GiB
-  # shared across ~185 (rollup_ephemeral_storage_gib).
-
-  container_definitions = jsonencode([
-    {
-      name      = "rollup-heavy"
-      image     = var.rollup_image
-      essential = true
-      command   = ["sh", "-c", local.rollup_heavy_script]
-      environment = [
-        { name = "HOT_BUCKET", value = var.hot_bucket },
-        { name = "AWS_REQUEST_CHECKSUM_CALCULATION", value = "when_required" },
-      ]
-      # No agency API keys here either -- see the main rollup container's
-      # comment above.
-      dependsOn = [
-        { containerName = "datadog-agent", condition = "START" }
-      ]
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.rollup_heavy.name
-          "awslogs-region"        = var.region
-          "awslogs-stream-prefix" = "rollup-heavy"
-        }
-      }
-    },
-    {
-      name      = "datadog-agent"
-      image     = "gcr.io/datadoghq/agent:7"
-      essential = false
-      memory    = 512
-      environment = [
-        { name = "DD_SITE", value = "datadoghq.com" },
-        { name = "DD_DOGSTATSD_NON_LOCAL_TRAFFIC", value = "true" },
-        { name = "DD_APM_ENABLED", value = "false" },
-        { name = "ECS_FARGATE", value = "true" },
-      ]
-      secrets = [
-        { name = "DD_API_KEY", valueFrom = "${aws_secretsmanager_secret.env.arn}:DD_API_KEY::" }
-      ]
-      stopTimeout = 120
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.rollup_heavy.name
-          "awslogs-region"        = var.region
-          "awslogs-stream-prefix" = "dd-agent"
-        }
-      }
-    }
-  ])
-}
