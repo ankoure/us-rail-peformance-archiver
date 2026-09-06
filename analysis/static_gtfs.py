@@ -68,9 +68,7 @@ class StaticGtfs:
     behavior for every agency that isn't a multi-operator aggregator.
     """
 
-    def __init__(
-        self, zip_path: Path | str, agency_prefix: str | None = None
-    ) -> None:
+    def __init__(self, zip_path: Path | str, agency_prefix: str | None = None) -> None:
         self.zip_path = Path(zip_path)
         if not self.zip_path.exists():
             raise FileNotFoundError(self.zip_path)
