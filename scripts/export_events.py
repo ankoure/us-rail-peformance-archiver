@@ -147,8 +147,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="MobilityDatabase feed ID (e.g. mdb-1847). Single-feed only. "
         "When provided with --agency, the export auto-fetches the static GTFS "
-        "snapshot effective for each date via the archived_feeds catalog. "
-        "Mutually exclusive with --gtfs.",
+        "snapshot effective for each date via MobilityDatabase's API (requires "
+        "MDB_REFRESH_TOKEN in the environment). Mutually exclusive with --gtfs.",
     )
     p.add_argument(
         "--agency",
@@ -164,7 +164,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--gtfs-api-url",
         default=DEFAULT_API_URL,
-        help="Archived-feeds catalog base URL",
+        help="MobilityDatabase API base URL",
     )
     args = p.parse_args(argv)
 

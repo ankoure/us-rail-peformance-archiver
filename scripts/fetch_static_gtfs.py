@@ -1,11 +1,11 @@
-"""Resolve a service date to a cached static GTFS zip via the archived_feeds catalog.
+"""Resolve a service date to a cached static GTFS zip via MobilityDatabase's API.
 
 Prints the local zip path on success. No-op (just prints the path) if the
-snapshot is already cached.
+snapshot is already cached. Requires MDB_REFRESH_TOKEN in the environment.
 
 Example:
 
-    uv run python scripts/fetch_static_gtfs.py \\
+    MDB_REFRESH_TOKEN=... uv run python scripts/fetch_static_gtfs.py \\
         --feed-id mdb-1847 --agency wmata --date 2026-05-20
 """
 
@@ -52,7 +52,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--api-url",
         default=DEFAULT_API_URL,
-        help=f"Archived-feeds catalog base URL (default: {DEFAULT_API_URL})",
+        help=f"MobilityDatabase API base URL (default: {DEFAULT_API_URL})",
     )
     return p.parse_args(argv)
 

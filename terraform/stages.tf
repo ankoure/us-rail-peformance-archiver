@@ -179,6 +179,9 @@ resource "aws_ecs_task_definition" "stage" {
         { name = "HOT_BUCKET", value = var.hot_bucket },
         { name = "AWS_REQUEST_CHECKSUM_CALCULATION", value = "when_required" },
       ]
+      secrets = [
+        { name = "MDB_REFRESH_TOKEN", valueFrom = "${aws_secretsmanager_secret.env.arn}:MDB_REFRESH_TOKEN::" }
+      ]
       dependsOn = [
         { containerName = "datadog-agent", condition = "START" }
       ]

@@ -226,10 +226,16 @@ ROUTES_SCHEMA = pa.schema(
 )
 
 # GTFS resolver defaults — duplicated from analysis.gtfs_fetcher rather than
-# imported, so gold.py's module import stays pandas-free. The on-time-performance
-# path imports gtfs_fetcher (pandas-backed) lazily in main(); see that module for
-# the canonical values and keep these in sync.
-_DEFAULT_GTFS_API_URL = "https://mwue7uiyf5.execute-api.us-east-1.amazonaws.com/api"
+# imported, matching that module's own duplication in pipeline/gtfs.py. (Stale
+# note removed 2026-09-06: pandas is a main dependency, not dev-only, and this
+# path runs in prod every night via stage-gold/heavy-gold's OTP marts -- the
+# "keeps gold.py pandas-free" reasoning this comment used to give was never
+# actually true of the deployed image, only of an import-time lazy-load
+# inside main(), which still applies and is the real reason to duplicate
+# rather than import at module scope.) Keep in sync with
+# analysis/gtfs_fetcher.py's DEFAULT_API_URL -- MDB_REFRESH_TOKEN must be set
+# in the environment for this to authenticate.
+_DEFAULT_GTFS_API_URL = "https://api.mobilitydatabase.org/v1"
 _DEFAULT_GTFS_CACHE_DIR = Path("data/static_gtfs")
 
 
@@ -324,7 +330,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--gtfs-api-url",
         default=_DEFAULT_GTFS_API_URL,
-        help="Archived-feeds catalog base URL for resolving GTFS snapshots.",
+        help="MobilityDatabase API base URL for resolving GTFS snapshots "
+        "(requires MDB_REFRESH_TOKEN in the environment).",
     )
     p.add_argument(
         "-f", "--force", action="store_true", help="Overwrite existing marts."

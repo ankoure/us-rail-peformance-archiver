@@ -146,7 +146,10 @@ _WEEKDAY_COLS = [
     "sunday",
 ]
 
-_DEFAULT_GTFS_API_URL = "https://mwue7uiyf5.execute-api.us-east-1.amazonaws.com/api"
+# Keep in sync with analysis/gtfs_fetcher.py's DEFAULT_API_URL and gold.py's
+# own copy of this same constant -- duplicated rather than imported to keep
+# this CLI self-contained, per this file's existing style.
+_DEFAULT_GTFS_API_URL = "https://api.mobilitydatabase.org/v1"
 _DEFAULT_GTFS_CACHE_DIR = Path("data/static_gtfs")
 
 GTFS_VERSIONS_SCHEMA = pa.schema(
@@ -362,7 +365,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--gtfs-api-url",
         default=_DEFAULT_GTFS_API_URL,
-        help="Archived-feeds catalog base URL for resolving GTFS snapshots.",
+        help="MobilityDatabase API base URL for resolving GTFS snapshots "
+        "(requires MDB_REFRESH_TOKEN in the environment).",
     )
     p.add_argument(
         "-f",
