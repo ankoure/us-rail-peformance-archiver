@@ -76,7 +76,7 @@ locals {
                   Overrides = {
                     ContainerOverrides = [{
                       Name            = "rollup"
-                      "Environment.$" = "States.Array(States.StringToJson(States.Format('{{\"Name\":\"ROLLUP_DAY\",\"Value\":\"{}\"}}', $.day)))"
+                      "Environment.$" = "States.Array(States.StringToJson(States.Format('\\{\"Name\":\"ROLLUP_DAY\",\"Value\":\"{}\"\\}', $.day)))"
                     }]
                   }
                 }
@@ -117,7 +117,7 @@ locals {
                   Overrides = {
                     ContainerOverrides = [{
                       Name            = "stage-gold"
-                      "Environment.$" = "States.Array(States.StringToJson(States.Format('{{\"Name\":\"ROLLUP_DAY\",\"Value\":\"{}\"}}', $.day)))"
+                      "Environment.$" = "States.Array(States.StringToJson(States.Format('\\{\"Name\":\"ROLLUP_DAY\",\"Value\":\"{}\"\\}', $.day)))"
                     }]
                   }
                 }
@@ -145,7 +145,7 @@ locals {
                   Overrides = {
                     ContainerOverrides = [{
                       Name            = "stage-snapshot"
-                      "Environment.$" = "States.Array(States.StringToJson(States.Format('{{\"Name\":\"ROLLUP_DAY\",\"Value\":\"{}\"}}', $.day)))"
+                      "Environment.$" = "States.Array(States.StringToJson(States.Format('\\{\"Name\":\"ROLLUP_DAY\",\"Value\":\"{}\"\\}', $.day)))"
                     }]
                   }
                 }
@@ -181,7 +181,7 @@ locals {
                   Overrides = {
                     ContainerOverrides = [{
                       Name            = "stage-archive"
-                      "Environment.$" = "States.Array(States.StringToJson(States.Format('{{\"Name\":\"ROLLUP_DAY\",\"Value\":\"{}\"}}', $.day)))"
+                      "Environment.$" = "States.Array(States.StringToJson(States.Format('\\{\"Name\":\"ROLLUP_DAY\",\"Value\":\"{}\"\\}', $.day)))"
                     }]
                   }
                 }
@@ -215,7 +215,7 @@ locals {
                   Overrides = {
                     ContainerOverrides = [{
                       Name            = "heavy-rollup"
-                      "Environment.$" = "States.Array(States.StringToJson(States.Format('{{\"Name\":\"ROLLUP_DAY\",\"Value\":\"{}\"}}', $.day)))"
+                      "Environment.$" = "States.Array(States.StringToJson(States.Format('\\{\"Name\":\"ROLLUP_DAY\",\"Value\":\"{}\"\\}', $.day)))"
                     }]
                   }
                 }
@@ -248,7 +248,7 @@ locals {
                   Overrides = {
                     ContainerOverrides = [{
                       Name            = "heavy-gold"
-                      "Environment.$" = "States.Array(States.StringToJson(States.Format('{{\"Name\":\"ROLLUP_DAY\",\"Value\":\"{}\"}}', $.day)))"
+                      "Environment.$" = "States.Array(States.StringToJson(States.Format('\\{\"Name\":\"ROLLUP_DAY\",\"Value\":\"{}\"\\}', $.day)))"
                     }]
                   }
                 }
