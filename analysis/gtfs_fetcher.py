@@ -128,7 +128,7 @@ class GtfsResolver:
         self.cache_dir = Path(cache_dir)
         self.api_url = api_url
         self._catalog: pd.DataFrame | None = None
-        self._loaded: dict[str, StaticGtfs] = {}
+        self._loaded: dict[tuple[str, str | None], StaticGtfs] = {}
 
     def catalog(self) -> pd.DataFrame:
         """The feed's archived-feeds catalog, fetched once and memoized."""
@@ -136,16 +136,27 @@ class GtfsResolver:
             self._catalog = fetch_catalog(self.feed_id, self.api_url)
         return self._catalog
 
-    def for_date(self, target_date: dt.date) -> StaticGtfs:
+    def for_date(
+        self, target_date: dt.date, agency_prefix: str | None = None
+    ) -> StaticGtfs:
         """StaticGtfs for the schedule in effect on `target_date`.
 
         Picks the snapshot from the catalog, downloads its zip if not cached,
         and loads it. Each distinct snapshot is downloaded and loaded once for
         the resolver's lifetime, so a date range sharing one schedule pays the
         cost a single time.
+
+        `agency_prefix` is forwarded to StaticGtfs (see its docstring) for a
+        zip covering multiple operators under one mdb_feed_id -- e.g. one
+        agency_id's several feeds each scoped to a different operator within
+        the same national feed (GO_AHEAD/Entur). The cache key includes it, so
+        the same snapshot requested under two different prefixes gets two
+        independently-filtered StaticGtfs instances rather than one shared
+        (and, for that reason, unfiltered) one.
         """
         snap = pick_snapshot(self.catalog(), target_date)
-        if snap.version_slug not in self._loaded:
+        cache_key = (snap.version_slug, agency_prefix)
+        if cache_key not in self._loaded:
             path = ensure_local_zip(snap, self.agency, self.cache_dir)
-            self._loaded[snap.version_slug] = StaticGtfs(path)
-        return self._loaded[snap.version_slug]
+            self._loaded[cache_key] = StaticGtfs(path, agency_prefix=agency_prefix)
+        return self._loaded[cache_key]

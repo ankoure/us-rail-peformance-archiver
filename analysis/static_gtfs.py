@@ -51,12 +51,30 @@ class StaticGtfs:
     optional files degrade to empty frames rather than raising, so a feed that
     omits e.g. calendar_dates.txt still works. The zip is never extracted to
     disk — tables are read straight out of the archive.
+
+    `agency_prefix` scopes every table to one GTFS `agency_id` (matched as
+    `f"{agency_prefix}:"` against routes.txt's agency_id column) for a zip that
+    covers MULTIPLE operators under one mdb_feed_id -- e.g. Entur's Norwegian
+    national feed (mdb-1078), which GO_AHEAD's config feeds share even though
+    each is really one operator's slice of it (GOA/RUT/VYB/VYX). Confirmed
+    2026-09-06: that zip's shapes.txt alone is 38M rows / 2.57 GB, and reading
+    it whole (the None/default path, unchanged for every other agency) OOMed a
+    20 GiB container before it could even finish parsing. When set,
+    `routes`/`trips` filter after a normal full read (both small: 291 KB /
+    62 MB here), then `shapes`/`stop_times` (the two big tables) filter WHILE
+    reading, chunk by chunk, so peak memory is bounded by one chunk instead of
+    the whole file -- filtering after a full read wouldn't help, since the
+    unfiltered read is the peak. None (the default) reproduces the exact prior
+    behavior for every agency that isn't a multi-operator aggregator.
     """
 
-    def __init__(self, zip_path: Path | str) -> None:
+    def __init__(
+        self, zip_path: Path | str, agency_prefix: str | None = None
+    ) -> None:
         self.zip_path = Path(zip_path)
         if not self.zip_path.exists():
             raise FileNotFoundError(self.zip_path)
+        self.agency_prefix = agency_prefix
 
     def __repr__(self) -> str:
         return f"StaticGtfs({self.zip_path})"
@@ -70,6 +88,37 @@ class StaticGtfs:
             with z.open(name) as f:
                 return pd.read_csv(f, **read_csv_kwargs)
 
+    def _read_chunked_filtered(
+        self,
+        name: str,
+        *,
+        filter_col: str,
+        allowed: set,
+        chunksize: int = 1_000_000,
+        **read_csv_kwargs,
+    ) -> pd.DataFrame:
+        """Like `_read`, but keeps only rows whose `filter_col` is in
+        `allowed`, filtering chunk-by-chunk so peak memory is bounded by one
+        chunk instead of the whole file.
+
+        Only used when `agency_prefix` scopes a multi-operator zip to a small
+        slice of a huge table (shapes.txt/stop_times.txt) -- filtering AFTER a
+        full read wouldn't help, since the unfiltered read is itself the peak
+        (see the class docstring: 38M rows / 2.57 GB for Entur's national
+        feed, confirmed to OOM a 20 GiB container before finishing parsing).
+        """
+        read_csv_kwargs.setdefault("skipinitialspace", True)
+        read_csv_kwargs["chunksize"] = chunksize
+        with zipfile.ZipFile(self.zip_path) as z:
+            with z.open(name) as f:
+                chunks = [
+                    chunk[chunk[filter_col].isin(allowed)]
+                    for chunk in pd.read_csv(f, **read_csv_kwargs)
+                ]
+        if not chunks:
+            return pd.DataFrame(columns=list(read_csv_kwargs.get("dtype", {})))
+        return pd.concat(chunks, ignore_index=True)
+
     @cached_property
     def trips(self) -> pd.DataFrame:
         """trips.txt. Required by the GTFS spec, but degrades to an empty
@@ -77,7 +126,7 @@ class StaticGtfs:
         several callers (e.g. [[trip_directions]], [[trip_shapes]]) only need
         to check column presence, not have the file guaranteed to exist."""
         try:
-            return self._read(
+            df = self._read(
                 "trips.txt",
                 usecols=lambda c: (
                     c
@@ -109,20 +158,36 @@ class StaticGtfs:
                     "shape_id",
                 ]
             )
+        if self.agency_prefix:
+            # trips.txt has no agency_id of its own -- scope via the
+            # already-filtered routes instead. Both tables are small enough
+            # (tens of MB) to read whole even unfiltered; only the two big
+            # tables below (shapes/stop_times) need chunked filtering.
+            df = df[df["route_id"].isin(self.routes["route_id"])]
+        return df
 
     @cached_property
     def routes(self) -> pd.DataFrame:
         try:
-            return self._read(
+            df = self._read(
                 "routes.txt",
+                # agency_id is only ever used by the agency_prefix filter
+                # below; harmless extra column for every other caller.
                 usecols=lambda c: (
                     c
-                    in {"route_id", "route_type", "route_short_name", "route_long_name"}
+                    in {
+                        "route_id",
+                        "route_type",
+                        "route_short_name",
+                        "route_long_name",
+                        "agency_id",
+                    }
                 ),
                 dtype={
                     "route_id": str,
                     "route_short_name": str,
                     "route_long_name": str,
+                    "agency_id": str,
                 },
             )
         except KeyError:
@@ -134,6 +199,9 @@ class StaticGtfs:
                     "route_long_name",
                 ]
             )
+        if self.agency_prefix and "agency_id" in df.columns:
+            df = df[df["agency_id"].str.startswith(f"{self.agency_prefix}:")]
+        return df
 
     @cached_property
     def stops(self) -> pd.DataFrame:
@@ -182,20 +250,35 @@ class StaticGtfs:
         shape_id); missing shapes.txt degrades to an empty frame rather than
         raising, matching routes/stops. shape_dist_traveled is itself an
         optional column within shapes.txt — `usecols` simply omits it when absent.
+
+        When agency_prefix scopes this zip, shapes.txt is read chunk-by-chunk
+        and filtered to just the (already-scoped) trips' shape_ids -- see
+        _read_chunked_filtered's docstring for why filtering has to happen
+        during the read, not after it.
         """
+        usecols = lambda c: (  # noqa: E731
+            c
+            in {
+                "shape_id",
+                "shape_pt_lat",
+                "shape_pt_lon",
+                "shape_pt_sequence",
+                "shape_dist_traveled",
+            }
+        )
         try:
+            if self.agency_prefix:
+                relevant_shape_ids = set(self.trips["shape_id"].dropna())
+                return self._read_chunked_filtered(
+                    "shapes.txt",
+                    filter_col="shape_id",
+                    allowed=relevant_shape_ids,
+                    usecols=usecols,
+                    dtype={"shape_id": str},
+                )
             return self._read(
                 "shapes.txt",
-                usecols=lambda c: (
-                    c
-                    in {
-                        "shape_id",
-                        "shape_pt_lat",
-                        "shape_pt_lon",
-                        "shape_pt_sequence",
-                        "shape_dist_traveled",
-                    }
-                ),
+                usecols=usecols,
                 dtype={"shape_id": str},
             )
         except KeyError:
@@ -626,22 +709,33 @@ class StaticGtfs:
         for callers that want to join to [[checkpoints]] themselves — this
         class doesn't derive a stop->checkpoint mapping, since checkpoint_id
         is per stop_time (per trip), not guaranteed stable per stop.
+
+        When agency_prefix scopes this zip, stop_times.txt is read
+        chunk-by-chunk and filtered to just the (already-scoped) trips' trip
+        ids -- same reasoning as [[shapes]].
         """
-        df = self._read(
-            "stop_times.txt",
-            usecols=lambda c: (
-                c
-                in {
-                    "trip_id",
-                    "stop_sequence",
-                    "stop_id",
-                    "arrival_time",
-                    "departure_time",
-                    "checkpoint_id",
-                }
-            ),
-            dtype={"trip_id": str, "stop_id": str, "checkpoint_id": str},
+        usecols = lambda c: (  # noqa: E731
+            c
+            in {
+                "trip_id",
+                "stop_sequence",
+                "stop_id",
+                "arrival_time",
+                "departure_time",
+                "checkpoint_id",
+            }
         )
+        dtype = {"trip_id": str, "stop_id": str, "checkpoint_id": str}
+        if self.agency_prefix:
+            df = self._read_chunked_filtered(
+                "stop_times.txt",
+                filter_col="trip_id",
+                allowed=set(self.trips["trip_id"]),
+                usecols=usecols,
+                dtype=dtype,
+            )
+        else:
+            df = self._read("stop_times.txt", usecols=usecols, dtype=dtype)
         # GTFS allows times like "25:30:00" (next-day continuation). Convert to seconds-since-noon-of-service-date
         # following the GTFS convention (noon-12h is the practical reference; using midnight is fine for our use
         # since both event and schedule are subtracted from the same midnight).

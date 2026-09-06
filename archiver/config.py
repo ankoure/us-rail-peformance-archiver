@@ -88,6 +88,17 @@ class FeedConfig(BaseModel):
     ] = "standard"
     poll_interval_seconds: int | None = Field(default=None, gt=0)
     mdb_feed_id: str | None = None
+    # Scopes pipeline/gtfs.py's static-GTFS processing to one GTFS agency_id
+    # prefix (matched as f"{prefix}:" against routes.txt's agency_id column)
+    # for a feed whose agency-level mdb_feed_id points at a zip covering
+    # MULTIPLE operators -- e.g. GO_AHEAD's feeds each cover one operator
+    # (GOA/RUT/VYB/VYX) within Entur's Norwegian national feed. None (the
+    # default) means the feed's static schedule is single-operator and
+    # StaticGtfs reads it whole, unfiltered, exactly as before this field
+    # existed. See analysis/static_gtfs.py's StaticGtfs docstring for why this
+    # matters: that national feed's shapes.txt is 38M rows / 2.57 GB, and
+    # reading it whole OOMed a 20 GiB container (confirmed 2026-09-06).
+    gtfs_agency_prefix: str | None = None
     method: Literal["GET", "POST"] = "GET"
     body: dict | None = None
 

@@ -3869,6 +3869,14 @@ agencies:
         decoder: standard
         poll_interval_seconds: 30
         mdb_feed_id: mdb-1797
+        # mdb-1078 (this agency's static schedule, above) is Entur's whole
+        # Norwegian national feed -- 38M shape points, confirmed to OOM a
+        # 20 GiB container reading it unfiltered (2026-09-06). Each GO_AHEAD
+        # feed is really one operator's slice of it; gtfs_agency_prefix scopes
+        # pipeline/gtfs.py to just this one (agency_id "GOA:Authority:GOA" in
+        # routes.txt) instead of the whole country. See
+        # analysis/static_gtfs.py's StaticGtfs docstring.
+        gtfs_agency_prefix: GOA
         method: GET
       - name: go-ahead-trips-1798
         path: /realtime/v1/gtfs-rt/trip-updates?datasource=RUT
@@ -3876,6 +3884,7 @@ agencies:
         decoder: standard
         poll_interval_seconds: 30
         mdb_feed_id: mdb-1798
+        gtfs_agency_prefix: RUT
         method: GET
       - name: go-ahead-alerts-1799
         path: /realtime/v1/gtfs-rt/alerts?datasource=RUT
@@ -3883,6 +3892,7 @@ agencies:
         decoder: standard
         poll_interval_seconds: 30
         mdb_feed_id: mdb-1799
+        gtfs_agency_prefix: RUT
         method: GET
       - name: go-ahead-trips-1800
         path: /realtime/v1/gtfs-rt/trip-updates?datasource=VYB
@@ -3890,6 +3900,7 @@ agencies:
         decoder: standard
         poll_interval_seconds: 30
         mdb_feed_id: mdb-1800
+        gtfs_agency_prefix: VYB
         method: GET
       - name: go-ahead-vehicles-1801
         path: /realtime/v1/gtfs-rt/vehicle-positions?datasource=VYB
@@ -3897,6 +3908,7 @@ agencies:
         decoder: standard
         poll_interval_seconds: 30
         mdb_feed_id: mdb-1801
+        gtfs_agency_prefix: VYB
         method: GET
       - name: go-ahead-vehicles-1803
         path: /realtime/v1/gtfs-rt/vehicle-positions?datasource=VYX
@@ -3904,6 +3916,7 @@ agencies:
         decoder: standard
         poll_interval_seconds: 30
         mdb_feed_id: mdb-1803
+        gtfs_agency_prefix: VYX
         method: GET
       - name: go-ahead-alerts-1804
         path: /realtime/v1/gtfs-rt/alerts?datasource=VYX
@@ -3911,6 +3924,7 @@ agencies:
         decoder: standard
         poll_interval_seconds: 30
         mdb_feed_id: mdb-1804
+        gtfs_agency_prefix: VYX
         method: GET
       - name: go-ahead-trips-1805
         path: /realtime/v1/gtfs-rt/trip-updates?datasource=VYX
@@ -3918,6 +3932,7 @@ agencies:
         decoder: standard
         poll_interval_seconds: 30
         mdb_feed_id: mdb-1805
+        gtfs_agency_prefix: VYX
         method: GET
     default_headers: {}
     mdb_feed_id: mdb-1078
