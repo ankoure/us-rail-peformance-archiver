@@ -17,6 +17,9 @@ import pytest
 from archiver.decoder import Row, Decoder, TableSpec
 from archiver.parser import Parser
 from archiver.source import LocalSource
+import logging
+
+from archiver.payloads import iter_payloads
 
 
 class FakeParser(Parser):
@@ -668,3 +671,54 @@ def test_rollup_uses_rust_decoder_for_standard_decoder_feeds(tmp_path):
     # TODO: assert the parquet landed and the row counts match the goldens --
     # 291 vehicles, 6950 trip_updates. Read the golden JSON lengths rather than
     # hardcoding, so regenerating fixtures doesn't silently desync the test.
+
+
+def test_iter_payloads_hash_named_joins_digest_to_timestamp():
+    """A digest-named file is one unframed payload, dated only by the join."""
+    data = b"alpha"
+    digest = hashlib.sha256(data).hexdigest()
+
+    got = list(iter_payloads(f"{digest}.bin", data, {digest: 1700000000}))
+
+    assert got == [(data, 1700000000)]
+
+
+def test_iter_payloads_hash_named_without_metadata_row_drops_loudly(caplog):
+    """No join, no fallback: the stem carries no time, so the row is dropped.
+
+    Dropping is the deliberate choice over fabricating a timestamp — a made-up
+    fetched_at would file the payload under the wrong day and stay plausible.
+    The warning is what makes the loss detectable, so it is asserted too.
+    """
+    data = b"orphan"
+    digest = hashlib.sha256(data).hexdigest()
+
+    with caplog.at_level(logging.WARNING):
+        got = list(iter_payloads(f"{digest}.bin", data, {}))
+
+    assert got == []
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert digest in caplog.text
+    assert "dropping" in caplog.text.lower()
+
+
+def test_iter_payloads_all_digit_digest_takes_hash_branch_not_legacy():
+    """The branch-ordering hazard: a digest that is also a valid numeral.
+
+    "1" * 64 is a syntactically valid sha256 hexdigest AND parses as a float,
+    so the two branches genuinely overlap on it. _HASH_STEM must be tested
+    before the legacy int(float(stem)) fallback — the legacy parse does not
+    raise here, it silently returns ~1.1e63, which would be accepted as a
+    fetched_at and partition the payload into a nonexistent year.
+    """
+    stem = "1" * 64
+    data = b"payload"
+
+    got = list(iter_payloads(f"{stem}.bin", data, {stem: 1700000000}))
+
+    assert got == [(data, 1700000000)]
+
+    # what the legacy branch would have produced instead: no exception to catch,
+    # just a number far outside any plausible unix timestamp
+    assert int(float(stem)) > 10**60

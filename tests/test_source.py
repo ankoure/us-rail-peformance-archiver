@@ -3,6 +3,10 @@ from datetime import date
 import pytest
 
 from archiver.source import LocalSource, S3Source
+import io
+import logging
+import tarfile
+
 
 # --------------------------------------------------------------------------- #
 # Shared dataset + builders
@@ -15,7 +19,7 @@ from archiver.source import LocalSource, S3Source
 #
 # Note: month/day are intentionally NOT zero-padded, matching how the code
 # builds and reads partition paths (f"month={day.month}" -> "month=1").
-
+RAW_A1 = "f/raw/year=2024/month=1/day=5/"
 D_A1 = date(2024, 1, 5)
 D_A2 = date(2024, 1, 6)
 D_B1 = date(2024, 2, 10)
@@ -259,3 +263,193 @@ def test_s3_discover_optimization_matches_full_scan():
     pinned = src.discover(feed="feedA", day=D_A1)
     full = {p for p in src.discover() if p == ("feedA", D_A1)}
     assert pinned == full == {("feedA", D_A1)}
+
+
+def make_tar(
+    members: dict[str, bytes],
+    *,
+    compressed: bool = False,
+    dirs: tuple[str, ...] = (),
+    symlinks: dict[str, str] | None = None,
+) -> bytes:
+    """Build tar bytes in memory for the .tar objects _ship_raw_window writes.
+
+    Directories and symlinks are separate parameters rather than sentinel
+    values in `members` because neither has contents of its own — encoding
+    them as None in a dict[str, bytes] would make the type a lie.
+
+    `compressed=True` writes gzip, which the caller still stores under a .tar
+    key: exactly the mismatch mode="r:" exists to reject and "r:*" would
+    silently decode.
+
+    mtime is pinned so equal members produce equal bytes, which the cross-tar
+    dedup test relies on.
+    """
+    symlinks = symlinks or {}
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz" if compressed else "w") as tar:
+        for name in dirs:
+            info = tarfile.TarInfo(name)
+            info.type = tarfile.DIRTYPE
+            info.mtime = 0
+            tar.addfile(info)
+        for name, target in symlinks.items():
+            info = tarfile.TarInfo(name)
+            info.type = tarfile.SYMTYPE
+            info.linkname = target
+            info.mtime = 0
+            tar.addfile(info)
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mtime = 0
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def test_s3_iter_bins_unpacks_tar_into_members():
+    """A .tar key yields its members, never the tar itself as one blob."""
+    up = FakeUploader()
+    up.put(
+        RAW_A1 + "window=1700000000--shipped=1700003600.tar",
+        make_tar({"aaa.bin": b"alpha", "bbb.bin": b"beta"}),
+    )
+    src = S3Source(up, "bucket")
+
+    assert dict(src.iter_bins("f", D_A1)) == {"aaa.bin": b"alpha", "bbb.bin": b"beta"}
+
+
+def test_s3_iter_bins_mixes_legacy_bins_and_tars():
+    """Both object shapes come out of one call, as during the migration."""
+    up = FakeUploader()
+    up.put(RAW_A1 + "window=00.bin", b"LEGACY")
+    up.put(
+        RAW_A1 + "window=1700000000--shipped=1700003600.tar",
+        make_tar({"aaa.bin": b"alpha"}),
+    )
+    src = S3Source(up, "bucket")
+
+    assert dict(src.iter_bins("f", D_A1)) == {
+        "window=00.bin": b"LEGACY",
+        "aaa.bin": b"alpha",
+    }
+
+
+def test_s3_iter_bins_ignores_unknown_extensions_beside_a_tar():
+    """Unrecognised keys are filtered on the name, before any GET."""
+    up = FakeUploader()
+    up.put(RAW_A1 + "_SUCCESS", b"")
+    up.put(RAW_A1 + "notes.txt", b"hi")
+    up.put(
+        RAW_A1 + "window=1700000000--shipped=1700003600.tar",
+        make_tar({"aaa.bin": b"alpha"}),
+    )
+    src = S3Source(up, "bucket")
+
+    assert dict(src.iter_bins("f", D_A1)) == {"aaa.bin": b"alpha"}
+    # never fetched, not fetched-then-discarded
+    assert [k for _, k in up.get_calls] == [
+        RAW_A1 + "window=1700000000--shipped=1700003600.tar"
+    ]
+
+
+def test_s3_iter_bins_skips_gzipped_tar_loudly_and_keeps_going(caplog):
+    """The reason mode="r:" was chosen over "r:*".
+
+    A gzip'd tar under a .tar key must raise ReadError (logged, object
+    skipped), not be silently auto-decoded. The later .bin proves one bad
+    object costs only itself — iteration is not abandoned.
+    """
+    up = FakeUploader()
+    bad_key = RAW_A1 + "window=1700000000--shipped=1700003600.tar"
+    up.put(bad_key, make_tar({"aaa.bin": b"alpha"}, compressed=True))
+    up.put(RAW_A1 + "window=00.bin", b"LEGACY")
+    src = S3Source(up, "bucket")
+
+    with caplog.at_level(logging.ERROR):
+        assert dict(src.iter_bins("f", D_A1)) == {"window=00.bin": b"LEGACY"}
+
+    assert "Unreadable raw tar" in caplog.text
+    assert bad_key in caplog.text
+    # the same bytes are readable under "r:*" — that is what is being refused
+    with tarfile.open(fileobj=io.BytesIO(up.store[bad_key]), mode="r:*") as tar:
+        assert tar.getnames() == ["aaa.bin"]
+
+
+def test_s3_iter_bins_skips_non_file_members():
+    """Directory and symlink members carry no payload of their own.
+
+    The symlink is the load-bearing case: extractfile() returns None for a
+    directory, so the `extracted is None` guard would cover that on its own,
+    but for a symlink it returns the *target's* bytes — only the isfile()
+    check stops "link.bin" being yielded as a second copy of aaa.bin.
+    """
+    up = FakeUploader()
+    up.put(
+        RAW_A1 + "window=1700000000--shipped=1700003600.tar",
+        make_tar(
+            {"aaa.bin": b"alpha"},
+            dirs=("subdir",),
+            symlinks={"link.bin": "aaa.bin"},
+        ),
+    )
+    src = S3Source(up, "bucket")
+
+    assert list(src.iter_bins("f", D_A1)) == [("aaa.bin", b"alpha")]
+
+
+def test_s3_iter_bins_skips_non_flat_member_names(caplog):
+    """arcname was path.name, so anything with a path in it is not ours.
+
+    getmembers() does not sanitise names — only the extraction filters do — so
+    these really do reach the loop and the check is load-bearing.
+    """
+    up = FakeUploader()
+    key = RAW_A1 + "window=1700000000--shipped=1700003600.tar"
+    up.put(
+        key,
+        make_tar(
+            {
+                "nested/inner.bin": b"nested",
+                "../escape.bin": b"escape",
+                ".": b"dot",
+                "..": b"dotdot",
+                "aaa.bin": b"alpha",
+            }
+        ),
+    )
+    src = S3Source(up, "bucket")
+
+    with caplog.at_level(logging.WARNING):
+        assert list(src.iter_bins("f", D_A1)) == [("aaa.bin", b"alpha")]
+
+    skipped = [r for r in caplog.records if "non-flat member" in r.getMessage()]
+    assert len(skipped) == 4
+
+
+def test_s3_iter_bins_dedups_a_member_across_two_tars():
+    """A retry ships a second tar with overlapping members (see
+    landing_uploader._ship_raw_window): the repeat must be yielded once.
+
+    Asserted on the ordered list of names, not a dict — a dict would collapse
+    a double-yield and hide exactly the regression this pins.
+    """
+    up = FakeUploader()
+    up.put(
+        RAW_A1 + "window=1700000000--shipped=1700003600.tar",
+        make_tar({"dupe.bin": b"payload", "only-first.bin": b"A"}),
+    )
+    up.put(
+        RAW_A1 + "window=1700000000--shipped=1700007200.tar",
+        make_tar({"dupe.bin": b"payload", "only-second.bin": b"B"}),
+    )
+    src = S3Source(up, "bucket")
+
+    pairs = list(src.iter_bins("f", D_A1))
+
+    assert [name for name, _ in pairs] == [
+        "dupe.bin",
+        "only-first.bin",
+        "only-second.bin",
+    ]
+    assert dict(pairs)["dupe.bin"] == b"payload"

@@ -393,7 +393,7 @@ class LandingUploader:
             key = window_tar_key(self._prefix, feed, window_start, int(time.time()))
             try:
                 with tempfile.TemporaryDirectory(
-                    dir=self._landing_dir, prefix=_MERGE_SCRATCH_PREFIX
+                    dir=self._landing_dir, prefix=_SCRATCH_PREFIX
                 ) as scratch:
                     staged = Path(scratch) / f"window={window_start}.tar"
                     with tarfile.open(staged, "w") as tar:
