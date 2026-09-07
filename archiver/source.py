@@ -1,6 +1,10 @@
+import io
+import tarfile
 from datetime import date
 from pathlib import Path
 from typing import Iterator, Protocol
+
+from archiver.logger import logger
 
 
 class Source(Protocol):
@@ -57,7 +61,12 @@ class LocalSource:
         return path.read_bytes() if path.exists() else b""
 
     def iter_bins(self, feed: str, day: date) -> Iterator[tuple[str, bytes]]:
-        """Yield (bin_name, bytes) for every bin for the given feed and day."""
+        """Yield (bin_name, bytes) for every bin for the given feed and day.
+
+        No tar branch here on purpose: the window tars only ever exist inside
+        LandingUploader's scratch directory, which is torn down on every exit
+        path. What is on the local disk is always loose {digest}.bin files.
+        """
         bin_files = (self.landing_dir / feed / "raw").glob(
             f"year={day.year}/month={day.month}/day={day.day}/*.bin"
         )
@@ -121,12 +130,72 @@ class S3Source:
         return found
 
     def iter_bins(self, feed, day):
+        """Yield (name, bytes) for every payload in the day's raw prefix.
+
+        Two object shapes coexist and both come out of one call: legacy flat
+        `.bin` objects from before the migration, yielded as-is, and `.tar`
+        objects written by LandingUploader._ship_raw_window, unpacked into
+        their `{digest}.bin` members. Callers see the same (name, bytes)
+        contract either way — payloads.iter_payloads dispatches on the name.
+        """
         prefix = self._day_prefix(feed, "raw", day)
+        seen_members: set[str] = set()
+
         for key in self._list_keys(self._bucket, prefix):
             if key.endswith(".bin"):
                 name = key.rsplit("/", 1)[-1]  # window=*.bin — keep the ext
                 data = self._uploader.get_bytes(self._bucket, key)
                 yield name, data
+
+            elif key.endswith(".tar"):
+                data = self._uploader.get_bytes(self._bucket, key)
+                # mode="r:" is exact-match uncompressed, matching the
+                # tarfile.open(staged, "w") that wrote these. "r"/"r:*" would
+                # auto-detect and silently accept a gzip'd tar that has no
+                # business being in this path; a loud ReadError is the point.
+                try:
+                    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as tar:
+                        for member in tar:
+                            if not member.isfile():
+                                continue  # dir/link entries carry no payload
+
+                            # arcname was path.name, so a member name should be
+                            # a bare "{digest}.bin". Anything with a path in it
+                            # didn't come from _ship_raw_window; nothing is
+                            # written to disk here so it can't traverse, but it
+                            # would break the digest join downstream.
+                            name = member.name
+                            if "/" in name or name in (".", ".."):
+                                logger.warning(
+                                    "Unexpected non-flat member %r in %s; skipping",
+                                    name,
+                                    key,
+                                )
+                                continue
+
+                            # Retried ships produce a second tar (window_tar_key
+                            # stamps int(time.time()), so the key differs) with
+                            # overlapping members. Names are content digests, so
+                            # a repeat is the same bytes by construction and
+                            # dropping it is safe — yielding it twice would
+                            # double-count the poll in the rollup.
+                            if name in seen_members:
+                                continue
+                            seen_members.add(name)
+
+                            extracted = tar.extractfile(member)
+                            if extracted is None:
+                                continue
+                            yield name, extracted.read()
+
+                except tarfile.TarError:
+                    logger.exception(
+                        "Unreadable raw tar %s; skipping object (its payloads are "
+                        "lost for this run — the local {digest}.bin files were "
+                        "deleted once the upload was confirmed)",
+                        key,
+                    )
+                    continue
 
     def read_metadata(self, feed, day):
         prefix = self._day_prefix(feed, "metadata", day)
