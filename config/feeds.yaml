@@ -1,10 +1,9 @@
 writer:
-  writer_type: batch
+  writer_type: content_addressed
   landing_dir: ./archive
   curated_dir: ./data/curated
   poll_state_dir: ./data/poll_state
-  window_seconds: 300 # 5 minute windows for batching writes; ignored by LocalWriter
-  merge_to_hourly: true # merge 12 window files into one hourly object before S3 upload (~12x fewer PUTs)
+  ship_window_seconds: 3600 # 60 minute windows
   landing_mode: s3
   landing_bucket: rail-performance-archiver-landing
   landing_prefix: "landing/"
