@@ -1,19 +1,16 @@
 from abc import ABC
-from datetime import timezone, datetime
 import hashlib
 import io
+import asyncio
 from pathlib import Path
 import shutil
 import struct
-import threading
 from typing import BinaryIO, Iterable
 
 from archiver.response import FeedResponse
 from archiver.logger import logger
 import json
 from abc import abstractmethod
-
-from archiver.sink import Sink
 
 
 class BaseWriter(ABC):
@@ -44,20 +41,14 @@ class BaseWriter(ABC):
             f.write(json.dumps(record) + "\n")
 
     @abstractmethod
-    def write(self, feed_name: str, response: FeedResponse) -> None: ...
-
-    @abstractmethod
-    def flush_due(self, now: float) -> None: ...
-
-    @abstractmethod
-    def flush_all(self) -> None: ...
+    async def write(self, feed_name: str, response: FeedResponse) -> None: ...
 
 
 class LocalWriter(BaseWriter):
     def __init__(self, base_dir: str) -> None:
         super().__init__(base_dir)
 
-    def write(self, feed_name: str, response: FeedResponse) -> None:
+    async def write(self, feed_name: str, response: FeedResponse) -> None:
         date = response.get_datetime()
         file_path = (
             self.base_dir
@@ -77,12 +68,6 @@ class LocalWriter(BaseWriter):
             logger.info("No content to persist")
 
         self.append_metadata(feed_name, response)
-
-    def flush_due(self, now: float) -> None:
-        pass
-
-    def flush_all(self) -> None:
-        pass
 
 
 MAGIC = b"\x89GRT"
@@ -249,75 +234,36 @@ class FrameReader:
             yield result
 
 
-class BatchingWriter(BaseWriter):
-    def __init__(self, base_dir: str, sink: Sink, window_seconds: int = 300) -> None:
-        super().__init__(base_dir)
-        self._window_seconds = window_seconds
-        self._buffer: dict[tuple[str, int], dict[str, bytes]] = {}
-        self._meta_buffer: dict[tuple[str, int], list[dict]] = {}
-        self._lock = threading.Lock()
-        self._sink = sink
+class ContentAddressedWriter(BaseWriter):
+    """Writes each response to disk immediately, named by content digest.
 
-    def write(self, feed_name: str, response: FeedResponse) -> None:
-        self.append_metadata(feed_name, response)  # local daily jsonl — unchanged
+    No in-memory buffer and no de-dup dict: identical content resolves to
+    the same {digest}.bin path, so the filesystem is the de-dup mechanism.
+    Batching for S3 is now purely LandingUploader's concern.
+    """
 
-        window = int(response.get_timestamp() // self._window_seconds)
-        key = (feed_name, window)
-        row = response.to_metadata_row()
+    async def write(self, feed_name: str, response: FeedResponse) -> None:
+        await asyncio.to_thread(self._write_sync, feed_name, response)
+
+    def _write_sync(self, feed_name: str, response: FeedResponse) -> None:
         payload = response.raw_payload()
+        if payload is not None:
+            date = response.get_datetime()
+            digest_hex = response.content_digest()  # sha256 hexdigest, str
+            path = (
+                self.base_dir
+                / feed_name
+                / "raw"
+                / f"year={date.year}"
+                / f"month={date.month}"
+                / f"day={date.day}"
+                / f"{digest_hex}.bin"
+            )
+            self.write_bytes_atomic(path, payload)
+        else:
+            logger.info("No content to persist")
 
-        with self._lock:
-            self._meta_buffer.setdefault(key, []).append(
-                row
-            )  # EVERY poll, incl. 304/dup
-            if payload is not None:
-                self._buffer.setdefault(key, {})[response.content_digest()] = payload
-
-    def flush_due(self, now: float) -> None:
-        current = int(now // self._window_seconds)
-        self._flush(lambda window: window < current)  # closed = strictly older windows
-
-    def flush_all(self) -> None:
-        self._flush(lambda window: True)  # shutdown: everything is "closed"
-
-    def _flush(self, is_closed) -> None:
-        # one lock acquisition → both buffers pop consistently; release before any I/O
-        with self._lock:
-            bins = {
-                k: self._buffer.pop(k) for k in list(self._buffer) if is_closed(k[1])
-            }
-            metas = {
-                k: self._meta_buffer.pop(k)
-                for k in list(self._meta_buffer)
-                if is_closed(k[1])
-            }
-        self._write_buckets(bins, metas)
-
-    def _write_buckets(self, bins: dict, metas: dict) -> None:
-        # INVARIANT: metas.keys() ⊇ bins.keys() — every poll appends a metadata row
-        # (before the payload early-return), so any window with a payload also has
-        # metadata. All-304 windows are in metas but NOT bins. So iterate metas.
-        for key, rows in metas.items():
-            feed, window = key
-            if key in bins:
-                self._put_bin(feed, window, bins[key])  # bin FIRST...
-            self._put_metadata(feed, window, rows)  # ...then metadata
-
-    def _window_key(self, feed: str, window: int, kind: str, ext: str) -> str:
-        unix = window * self._window_seconds
-        dt = datetime.fromtimestamp(unix, tz=timezone.utc)
-        return (
-            f"{feed}/{kind}/year={dt.year}/month={dt.month}"
-            f"/day={dt.day}/window={unix}.{ext}"
-        )
-
-    def _put_bin(self, feed: str, window: int, frames: dict[str, bytes]) -> None:
-        buf = io.BytesIO()
-        fw = FrameWriter(buf)
-        for digest_hex, payload in frames.items():
-            fw.write_frame(payload, bytes.fromhex(digest_hex))
-        self._sink.put(self._window_key(feed, window, "raw", "bin"), buf.getvalue())
-
-    def _put_metadata(self, feed: str, window: int, rows: list[dict]) -> None:
-        body = "".join(json.dumps(r) + "\n" for r in rows).encode("utf-8")
-        self._sink.put(self._window_key(feed, window, "metadata", "jsonl"), body)
+        # AFTER the bin write. Same ordering invariant BatchingWriter held:
+        # a metadata row must never point at a payload that isn't on disk yet.
+        # Guaranteed here by sequential execution inside the one to_thread hop.
+        self.append_metadata(feed_name, response)

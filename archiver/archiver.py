@@ -115,7 +115,7 @@ class FeedArchiver:
                     type(e).__name__,
                     e,
                 )
-            self.writer.write(feed.name, response)
+            await self.writer.write(feed.name, response)
             # Returned so the loop can classify the outcome (success vs failure)
             # for backoff/quarantine. On the outer-except path below, returns None
             # implicitly => an archiver-side error, which the loop ignores for
