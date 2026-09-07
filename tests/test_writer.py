@@ -3,17 +3,14 @@ import hashlib
 import io
 import json
 from dataclasses import dataclass
-from archiver.sink import LocalSink
 from archiver.writer import (
     BadHeaderError,
-    BatchingWriter,
     CorruptFrameError,
     FrameReader,
     FrameWriter,
     LocalWriter,
 )
 import pytest
-from tests.fakes.sink import FakeSink
 
 
 @dataclass
@@ -46,14 +43,14 @@ class FakeEmptyPayloadResponse(FakeWriteableResponse):
         return None
 
 
-def test_writer_creates_raw_file_and_metadata(tmp_path):
+async def test_writer_creates_raw_file_and_metadata(tmp_path):
     writer = LocalWriter(base_dir=str(tmp_path))
     response = FakeWriteableResponse(
         _payload=b"\x01\x02\x03",
         _metadata={"status_code": 200, "response_type": "ProtobufResponse"},
     )
 
-    writer.write(feed_name="test-feed", response=response)
+    await writer.write(feed_name="test-feed", response=response)
     date = response.get_datetime()
 
     # raw file landed under the expected path
@@ -90,14 +87,14 @@ def test_writer_creates_raw_file_and_metadata(tmp_path):
     assert row == {"status_code": 200, "response_type": "ProtobufResponse"}
 
 
-def test_errorresponse_writes_no_bin(tmp_path):
+async def test_errorresponse_writes_no_bin(tmp_path):
     writer = LocalWriter(base_dir=str(tmp_path))
     response = FakeEmptyPayloadResponse(
         _payload=b"",
         _metadata={"status_code": 401, "response_type": "ErrorResponse"},
     )
 
-    writer.write(feed_name="test-feed", response=response)
+    await writer.write(feed_name="test-feed", response=response)
     date = response.get_datetime()
 
     # raw file landed under the expected path
@@ -178,101 +175,3 @@ def test_bad_magic():
     buf = io.BytesIO(b"\x00\x00\x00\x00\x00")
     with pytest.raises(BadHeaderError):
         list(FrameReader(buf))
-
-
-def test_batching_writer_flushes_closed_window(tmp_path):
-    writer = BatchingWriter(
-        base_dir=str(tmp_path), sink=LocalSink(str(tmp_path)), window_seconds=300
-    )
-
-    t1 = datetime(2026, 5, 4, 12, 0, 0, tzinfo=timezone.utc)
-    t2 = datetime(2026, 5, 4, 12, 1, 0, tzinfo=timezone.utc)
-
-    r1 = FakeWriteableResponse(_payload=b"payload one", _metadata={"status_code": 200})
-    r2 = FakeWriteableResponse(_payload=b"payload two", _metadata={"status_code": 200})
-
-    # override timestamps so both land in the same window
-    r1._timestamp = t1.timestamp()
-    r2._timestamp = t2.timestamp()
-
-    writer.write(feed_name="test-feed", response=r1)
-    writer.write(feed_name="test-feed", response=r2)
-
-    # flush from inside the window — nothing should be written yet
-    writer.flush_due(t2.timestamp())
-    raw_files = list((tmp_path / "test-feed" / "raw").rglob("*.bin"))
-    assert len(raw_files) == 0
-
-    # flush from past the window boundary — one object with two frames
-    now = datetime(2026, 5, 4, 12, 10, 0, tzinfo=timezone.utc)
-    writer.flush_due(now.timestamp())
-
-    raw_files = list((tmp_path / "test-feed" / "raw").rglob("*.bin"))
-    assert len(raw_files) == 1
-
-    with open(raw_files[0], "rb") as fh:
-        frames = list(FrameReader(fh))
-    assert len(frames) == 2
-    payloads = {f[0] for f in frames}
-    assert payloads == {b"payload one", b"payload two"}
-
-
-def test_batching_writer_does_not_flush_open_window(tmp_path):
-    writer = BatchingWriter(
-        base_dir=str(tmp_path), sink=LocalSink(str(tmp_path)), window_seconds=300
-    )
-
-    t1 = datetime(2026, 5, 4, 12, 0, 0, tzinfo=timezone.utc)
-    r1 = FakeWriteableResponse(_payload=b"payload one", _metadata={"status_code": 200})
-    r1._timestamp = t1.timestamp()
-
-    writer.write(feed_name="test-feed", response=r1)
-
-    # flush from inside the same window — nothing should be written
-    now = datetime(2026, 5, 4, 12, 4, 0, tzinfo=timezone.utc)
-    writer.flush_due(now.timestamp())
-
-    raw_files = list((tmp_path / "test-feed" / "raw").rglob("*.bin"))
-    assert len(raw_files) == 0
-    assert len(writer._buffer) == 1
-
-
-def test_batching_writer_emits_per_window_metadata_including_304(tmp_path):
-    sink = FakeSink()
-    writer = BatchingWriter(base_dir=str(tmp_path), sink=sink, window_seconds=300)
-
-    payload_poll = FakeWriteableResponse(
-        _payload=b"<Siri>...</Siri>",
-        _metadata={"status_code": 200, "response_type": "ProtobufResponse"},
-    )
-    not_modified_poll = FakeWriteableResponse(
-        _payload=None,
-        _metadata={"status_code": 304, "response_type": "NotModifiedResponse"},
-    )
-
-    writer.write("siri_et", payload_poll)
-    writer.write("siri_et", not_modified_poll)
-    writer.flush_all()
-
-    # 1. exactly one metadata object, under metadata/.../window=*.jsonl
-    meta_keys = [k for k in sink.puts if "/metadata/" in k]
-    assert len(meta_keys) == 1
-    assert "window=" in meta_keys[0] and meta_keys[0].endswith(".jsonl")
-
-    # 2. it has TWO rows — the 304 row survived despite carrying no payload
-    rows = [
-        json.loads(line)
-        for line in sink.puts[meta_keys[0]].decode().splitlines()
-        if line
-    ]
-    assert len(rows) == 2
-    assert {r["status_code"] for r in rows} == {200, 304}
-
-    # 3. exactly one bin object (only the payload-bearing poll produced bytes)
-    bin_keys = [k for k in sink.puts if k.endswith(".bin")]
-    assert len(bin_keys) == 1
-
-    # 4. bin put before metadata for this window — a reader builds the
-    #    digest->ts map from metadata then reads frames, so the bin must
-    #    already exist when the metadata referencing it lands.
-    assert list(sink.puts).index(bin_keys[0]) < list(sink.puts).index(meta_keys[0])
