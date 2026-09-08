@@ -166,7 +166,7 @@ Everything below lives on the hot path and is exercised by [tests/](tests/).
 | **Stay within agency quotas** | Per-agency continuous `TokenBucket` consulted as a non-blocking gate | [rate_limit.py](archiver/rate_limit.py) |
 | **Survive flaky / dead feeds** | `FeedHealth` — exponential backoff per consecutive failure (capped), then quarantine to a long interval after N fails; one success resets it | [health.py](archiver/health.py) |
 | **Detect a hung process** | Heartbeat metric + `poll_state/.heartbeat` file refreshed every tick; the container `HEALTHCHECK` stats it and an `autoheal` sidecar restarts on staleness | [main.py](main.py), [dockerfile](dockerfile) |
-| **Crash-safe writes** | All raw/parquet writes go through `*.tmp` → atomic rename; framed window files carry per-payload SHA-256 digests so a truncated/corrupt frame is detected on read | [writer.py](archiver/writer.py) |
+| **Crash-safe writes** | All raw/parquet writes go through `*.tmp` → atomic rename; raw payloads are named by their own SHA-256 digest, so integrity is just re-hashing the file. Framed multi-payload window files are a legacy, read-only format (still supported for old cold-archive tarballs) whose per-payload digests serve the same purpose | [writer.py](archiver/writer.py) |
 | **Notice schema drift** | Decoders validate input keys; a feed dropping a required field records `DecodeFailureResponse` (raw bytes still kept) and emits `decoder.schema_drift` | [parser.py](archiver/parser.py), [decoder.py](archiver/decoder.py) |
 | **Horizontal scale** | Stable `sha256(agency_id) % shard_count` assignment; run N workers with disjoint `--shard-index` | [shard.py](archiver/shard.py) |
 
@@ -180,11 +180,11 @@ Top-level keys (see [archiver/config.py](archiver/config.py) for the full pydant
 
 ```yaml
 writer:
-  writer_type: batch          # "local" (one .bin per poll) | "batch" (framed windows)
+  writer_type: content_addressed  # "local" (timestamp-named) | "content_addressed" (sha256-named)
   landing_dir: ./archive
   curated_dir: ./data/curated
   poll_state_dir: ./data/poll_state # conditional-GET / dedup state + .heartbeat
-  window_seconds: 300         # batch window size; ignored by the local writer
+  ship_window_seconds: 3600   # how often raw payloads are tarred and shipped to S3; ignored by the local writer
 
 telemetry:
   enabled: false              # set true to emit DogStatsD metrics

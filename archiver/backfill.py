@@ -1,7 +1,8 @@
 """One-shot landing backfill: ship local window objects to S3, exists()-gated.
 
-Soak-phase parity tool, the batch counterpart to the continuous LandingUploader.
-Differences, all because the contexts differ:
+Soak-phase parity tool from the original local -> s3 landing_mode migration,
+the batch counterpart to the continuous LandingUploader. Differences, all
+because the contexts differ:
   - exists()-gated, not delete-on-ship: idempotent and re-runnable; ships only
     what S3 is missing. HEADs are cheap at batch cadence.
   - parallel (ThreadPoolExecutor), not single-threaded: this is a catch-up batch
@@ -9,9 +10,21 @@ Differences, all because the contexts differ:
   - never deletes: during the soak local is authoritative; this only populates
     and verifies S3.
 
-Selection and key mapping come from archiver.landing_layout, shared verbatim
-with LandingUploader so the keys are identical -- otherwise the parity check
-would be the source of the discrepancy.
+METADATA-ONLY as of the move to ContentAddressedWriter: selection comes from
+archiver.landing_layout.iter_window_objects, whose WINDOW_OBJECT_GLOBS now
+matches only metadata window=*.jsonl files -- raw payloads are content-hash-named
+(no window=*.bin to glob) and shipped as per-window tars by LandingUploader's
+own _ship_raw_window, which this tool has no counterpart for. That's a
+deliberate scope decision, not an oversight: this was a one-time migration
+tool for the original soak, not something run in ongoing operation, so it
+wasn't worth extending for a storage format that arrived well after that soak
+ended. If it ever needs to run again against data that includes raw
+content-addressed payloads, it will only backfill/verify metadata -- raw
+gaps will not be caught by run() or verify() and would need a separate pass.
+
+Key mapping (window_object_key) is shared verbatim with LandingUploader so the
+keys are identical -- otherwise the parity check would be the source of the
+discrepancy.
 """
 
 from __future__ import annotations

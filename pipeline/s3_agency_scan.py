@@ -134,25 +134,21 @@ def estimate_landing(
     poll_interval_s: int,
     avg_msg_bytes: int,
     window_s: int,
-    merge_to_hourly: bool = False,
 ) -> tuple[float, float, float]:
     """Estimate landing bucket usage over the 30-day lifecycle window.
 
     Returns (est_bytes_stored, put_count, get_count).
 
-    Storage is the peak bytes in the bucket (30 days × daily writes). S3
+    Storage is the peak bytes in the bucket (30 days x daily writes). S3
     bills on time-weighted GB-months, so the real cost is ~half this; the
     estimate errs on the high side intentionally.
 
-    When merge_to_hourly=True, the uploader merges 5-min window files into
-    one hourly .bin + .jsonl before uploading, so S3 sees 24 objects/feed/day
-    instead of 2 × (86400/window_s).
+    One raw tar + one metadata .jsonl gets shipped per window (`window_s`
+    seconds), so S3 sees 2 * (86400 / window_s) objects/feed/day.
     """
     polls_per_day = 86400 / poll_interval_s
-    if merge_to_hourly:
-        objects_per_day = 2 * 24  # one .bin + one .jsonl per hour
-    else:
-        objects_per_day = 2 * (86400 / window_s)  # one .bin + one .jsonl per window
+
+    objects_per_day = 2 * (86400 / window_s)  # one .bin + one .jsonl per window
     est_bytes = polls_per_day * avg_msg_bytes * 30
     put_count = objects_per_day * 30  # 30 days of landing writes
     get_count = objects_per_day * 30  # rollup reads each object once
@@ -197,8 +193,7 @@ def scan_agencies(
         est_bytes, put_count, get_count = estimate_landing(
             poll_interval,
             avg_msg_bytes,
-            config.writer.window_seconds,
-            config.writer.merge_to_hourly,
+            config.writer.ship_window_seconds,
         )
         return (
             agency.name,

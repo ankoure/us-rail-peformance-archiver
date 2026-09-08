@@ -156,13 +156,12 @@ class AgencyConfig(BaseModel):
 
 class WriterConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    writer_type: Literal["local", "batch"] = "batch"
+    writer_type: Literal["local", "content_addressed"] = "content_addressed"
     landing_bucket: str = ""
     landing_prefix: str = ""
     landing_mode: Literal["local", "s3"] = "local"
     rollup_source: Literal["local", "s3"] = "local"
-    window_seconds: int = 300
-    merge_to_hourly: bool = False
+    ship_window_seconds: int = 3600
     landing_dir: Path
     curated_dir: Path
     poll_state_dir: Path = Path("./data/poll_state")

@@ -49,6 +49,15 @@ services:
     image: ghcr.io/ankoure/us-rail-performance-archiver:${IMAGE_TAG:-latest}
     restart: unless-stopped
     user: "1000:1000"
+    # Docker's default (10s) is shorter than LandingUploader.__aexit__'s own
+    # join timeout (_JOIN_TIMEOUT_S = 60s in archiver/landing_uploader.py) --
+    # `docker compose up -d` recreating this container on deploy would SIGKILL
+    # the old process well before its graceful shutdown (drain in-flight
+    # polls, join the landing-uploader thread, run the final drain) can finish,
+    # on every deploy, not just this one. 90s = 60s join timeout + a 30s buffer
+    # for the rest of that shutdown sequence. Keep in sync if _JOIN_TIMEOUT_S
+    # ever changes.
+    stop_grace_period: 90s
     labels:
       - autoheal=true
       - "com.datadoghq.ad.logs=[{\"source\": \"python\", \"service\": \"rail-archiver\"}]"

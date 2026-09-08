@@ -152,14 +152,6 @@ async def run(args):
                     logger.info("Feed %s recovered from quarantine", feed.name)
                 health.record_success(feed.name)
 
-        # flush_due gating: windows are wall-clock-aligned, so every feed's window
-        # closes on the same boundary -> one synchronized write burst. Flush only
-        # when the window index advances (not every tick), and offload the burst to
-        # a thread so it never blocks the loop / heartbeat. Safe because
-        # BatchingWriter guards its buffer with a threading.Lock.
-        window_seconds = config.writer.window_seconds
-        last_window = None
-
         try:
             while not stop.is_set() and (args.polls is None or polls < args.polls):
                 due_at, feed = scheduler.next_due()
@@ -197,21 +189,9 @@ async def run(args):
                     task.add_done_callback(functools.partial(_on_done, feed))
                 scheduler.mark_polled(feed, interval=interval)
 
-                # Wall-clock (NOT the monotonic `now` above): window keys are unix
-                # seconds. Flush only when crossing into a new window.
-                wall = time.time()
-                current_window = int(wall // window_seconds)
-                if current_window != last_window:
-                    last_window = current_window
-                    await asyncio.to_thread(archiver.writer.flush_due, wall)
-
                 polls += 1
         finally:
-            # Drain ordering (correctness): finish in-flight polls BEFORE flushing
-            # (a poll may still be buffering bytes), and both BEFORE the stack
-            # closes the clients (an in-flight poll is still using its client).
             await asyncio.gather(*inflight)
-            archiver.writer.flush_all()
 
 
 def main(args):

@@ -13,10 +13,13 @@ import io
 import json
 from datetime import date
 from typing import Iterator
+import re
 
 from archiver.logger import logger
 from archiver.source import Source
 from archiver.writer import FrameError, FrameReader
+
+_HASH_STEM = re.compile(r"^[0-9a-f]{64}$")  # sha256 hexdigest: exactly 64 hex chars
 
 
 def digest_timestamps(source: Source, feed_name: str, day: date) -> dict[str, int]:
@@ -79,7 +82,7 @@ def iter_payloads(
 ) -> Iterator[tuple[bytes, int]]:
     """Yield (payload_bytes, fetched_at) for one raw .bin file, format-agnostic.
 
-    Three on-disk shapes coexist:
+    Four on-disk shapes coexist:
       * legacy LocalWriter  -> filename stem IS the wall-clock ts; the whole file
         is ONE payload.
       * BatchingWriter      -> filename `window=<unix>`; the file is `\\x89GRT` +
@@ -90,6 +93,10 @@ def iter_payloads(
       * Hourly merged       -> filename `hour=<unix>`; same framed format as
         `window=`, produced by LandingUploader when `merge_to_hourly=True`. The
         hour-start unix is used as the fallback timestamp when a digest is absent.
+      * ContentAddressedWriter / raw-tar member -> filename stem IS the sha256
+        hexdigest; the whole file is ONE unframed payload and the filename
+        encodes no timestamp at all, so `digest_ts` is the ONLY source of
+        `fetched_at`. Unjoinable payloads are dropped, not dated (see below).
 
     Keeping this the single source of "how to get payloads out of a file" lets
     every caller (Rollup's parse -> decode -> append loop, alert_snapshot's
@@ -117,6 +124,42 @@ def iter_payloads(
                 fallback_ts,
                 exc,
             )
+
+    elif _HASH_STEM.match(stem):
+        # --- ContentAddressedWriter file / raw-tar member ---
+        # One unframed payload, like the legacy branch. Unlike EVERY other shape
+        # here, the filename carries no time: the stem is the digest, so the
+        # metadata join is not a refinement over a filename fallback, it is the
+        # whole timestamp.
+        #
+        # Which means there is nothing to degrade to when the join misses.
+        # window=/hour= can fall back to the window/hour start and still be
+        # telling the truth, just coarsely — a payload in window=N really was
+        # fetched inside that window. Nothing available here has that property:
+        #   * mtime isn't reachable — this function takes (name, bytes), never a
+        #     path or a TarInfo — and for a tar member it would be the archive's
+        #     write time, which is the ship time, not the poll time.
+        #   * now/today is a pure invention, and a damaging one: fetched_at is
+        #     what the rollup partitions and windows by, so a fabricated value
+        #     files the payload under the wrong day and every count derived from
+        #     it stays plausible and wrong. Nothing downstream can detect it.
+        #
+        # Dropping is the visible failure: one WARNING per orphan, and the
+        # payload count stops matching the metadata row count for that day —
+        # both things a human or a check can see. So: drop, loudly.
+        fetched_at = digest_ts.get(stem)
+        if fetched_at is None:
+            logger.warning(
+                "No metadata row for digest-named payload %s (%d bytes); dropping. "
+                "Expected if the writer died between the .bin write and the "
+                "metadata append, or if the day's metadata partition is missing "
+                "entirely — in which case EVERY payload for this day drops.",
+                name,
+                len(data),
+            )
+            return
+
+        yield data, fetched_at
 
     else:
         # --- Legacy LocalWriter file ---

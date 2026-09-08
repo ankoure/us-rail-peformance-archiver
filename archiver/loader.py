@@ -30,11 +30,14 @@ from archiver.region import belongs_to_continent, TIMEZONE_TO_CONTINENT
 from archiver.rollup import Rollup
 from archiver.shard import belongs_to_shard
 from archiver.shipper import Shipper
-from archiver.sink import LocalSink
 from archiver.source import LocalSource, S3Source, Source
 from archiver.telemetry import NoOpTelemetry, Telemetry
 from archiver.uploader import Uploader
-from archiver.writer import BaseWriter, BatchingWriter, LocalWriter
+from archiver.writer import (
+    BaseWriter,
+    ContentAddressedWriter,
+    LocalWriter,
+)
 
 # Single source of truth for what a valid --continent value is: whatever
 # boxes region.py actually assigns timezones to, so this can't drift out
@@ -274,10 +277,8 @@ def build_writer(config: ArchiverConfig) -> BaseWriter:
     match writer.writer_type:
         case "local":
             return LocalWriter(writer.landing_dir)  # legacy per-poll; no sink
-        case "batch":
-            return BatchingWriter(
-                writer.landing_dir, LocalSink(writer.landing_dir), writer.window_seconds
-            )
+        case "content_addressed":
+            return ContentAddressedWriter(writer.landing_dir)
 
         case other:
             raise ValueError(f"Unsupported writer_type: {other}")
@@ -400,7 +401,7 @@ def build_landing_uploader(
             bucket=config.writer.landing_bucket,
             prefix=config.writer.landing_prefix,
             telemetry=telemetry,
-            merge_to_hourly=config.writer.merge_to_hourly,
+            ship_window_seconds=config.writer.ship_window_seconds,
             feed_names=feed_names,
         )
     else:
