@@ -46,9 +46,13 @@ jobs:
             services: ""
           - name: eu
             region: eu-central-1
-            # app-shard-1 runs here as a dedicated pinned shard (DELFI), not
-            # a second general-pool member -- see compose.prod.yml.
-            services: "datadog-agent app-shard-0 app-shard-1 autoheal"
+            # app-shard-1 used to run here as a dedicated pinned shard (DELFI),
+            # but that feed was disabled 2026-08-26 (see config/feeds.yaml) and
+            # the shard was never repointed at anything else -- it just crashed
+            # on an empty scheduler heap (Scheduler.next_due()) on every start.
+            # Retired here rather than deleted from compose.prod.yml: us-east-1
+            # still runs app-shard-1 as the second half of its general pool.
+            services: "datadog-agent app-shard-0 autoheal"
           - name: au
             region: ap-southeast-2
             services: "datadog-agent app-shard-0 autoheal"

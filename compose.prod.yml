@@ -80,15 +80,19 @@ services:
     depends_on:
       - datadog-agent
 
-  # Dual purpose, depending on which box starts it (see deploy.yml):
-  #   - us-east-1 (SHARD_COUNT=2): the second half of the general hash pool.
-  #   - eu (SHARD_COUNT=1): a dedicated pinned shard. With SHARD_COUNT=1,
-  #     index 0 (app-shard-0) IS the whole general pool, so index 1 has no
-  #     hash-pool agencies of its own -- it exists purely to run whichever
-  #     agencies are pinned there via `shard_pin` in feeds.yaml (currently
-  #     GTFS_DE_DELFI_REALTIME_DATA, isolated after its ~150-200MB/5min
-  #     payload was causing poll.skipped bursts on the shared EU pool).
-  #   au doesn't start this service -- no agency there is pinned (yet).
+  # us-east-1 only (see deploy.yml's matrix): the second half of its
+  # SHARD_COUNT=2 general hash pool.
+  #
+  # eu used to start this too, as a dedicated pinned shard for
+  # GTFS_DE_DELFI_REALTIME_DATA (`shard_pin: 1` in feeds.yaml, isolated after
+  # its ~150-200MB/5min payload was causing poll.skipped bursts on the shared
+  # EU pool). DELFI was disabled 2026-08-26; nothing repointed the shard, so
+  # with SHARD_COUNT=1 on that box (index 0 IS the whole general pool) it had
+  # zero feeds and crashed on an empty scheduler heap on every start. Retired
+  # from eu's deploy.yml matrix rather than deleted here, since us-east-1
+  # still needs the service definition.
+  #
+  # au doesn't start this service -- no agency there is pinned (yet).
   app-shard-1:
     <<: *poller
     volumes:
