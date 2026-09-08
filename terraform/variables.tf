@@ -34,7 +34,7 @@ variable "landing_prune_keep_days" {
   # proactive cleanup, so the lifecycle is just a backstop" -- but prune_s3.py
   # was never actually scheduled anywhere, so the "backstop" was doing all the
   # deleting, including of days that had never been archived. See landing.tf.
-  default     = 3
+  default     = 1
   description = <<-EOT
     Days of landing to retain when the nightly rollup task runs prune_s3.py.
     The rollup only needs yesterday; the rest is a buffer for re-rolls. Unlike
