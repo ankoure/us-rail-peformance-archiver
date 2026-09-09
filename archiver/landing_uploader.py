@@ -52,7 +52,7 @@ class LandingUploader:
     one is materialized (``_scan_once_window``, paced by ``scan_interval``) --
     this half is unchanged from before content-addressed raw storage existed.
 
-    Raw payloads ship as one uncompressed tar per window (``_maybe_ship_raw_windows``,
+    Raw payloads ship as one gzip'd tar per window (``_maybe_ship_raw_windows``,
     paced independently by ``ship_window_seconds``, since PUT count against S3
     is exactly what that cadence exists to bound). ``ContentAddressedWriter``
     writes each poll's payload immediately to a content-hash-named
@@ -395,8 +395,13 @@ class LandingUploader:
                 with tempfile.TemporaryDirectory(
                     dir=self._landing_dir, prefix=_SCRATCH_PREFIX
                 ) as scratch:
-                    staged = Path(scratch) / f"window={window_start}.tar"
-                    with tarfile.open(staged, "w") as tar:
+                    staged = Path(scratch) / f"window={window_start}.tar.gz"
+                    # compresslevel=6, not tarfile's default 9: matches
+                    # shipper.py's cold-tarball choice — the EU/AU boxes are
+                    # 2-vCPU, and 9 would burn a full core per window for
+                    # little extra ratio. Raw protobuf + repeated field
+                    # structure still compresses several-fold at 6.
+                    with tarfile.open(staged, "w:gz", compresslevel=6) as tar:
                         for path in present:
                             try:
                                 tar.add(path, arcname=path.name)

@@ -678,6 +678,47 @@ def test_repeated_digest_in_one_window_is_tarred_once(tmp_path):
     assert len(lines) == 2
 
 
+def test_shipped_tar_gz_round_trips_through_s3source_iter_bins(tmp_path):
+    """End-to-end: the real write path's bytes must be exactly what the real
+    read path (S3Source.iter_bins) expects -- not just two test fixtures
+    agreeing with each other. Guards the .tar.gz key/mode wiring between
+    landing_uploader.py and source.py, which nothing enforces structurally --
+    iter_bins matches on a literal ".tar.gz" suffix, not by calling
+    window_tar_key, so a drift between the two would only surface here or in
+    prod (silently, at next-day rollup, after the local bins are gone).
+    """
+    from archiver.source import S3Source
+
+    lu, up, _ = make_uploader(tmp_path, ship_window_seconds=WINDOW)
+    ws = int(NOW - 3 * WINDOW)
+
+    first = add_response(tmp_path, FEED, ws + 10, payload=b"alpha")
+    second = add_response(tmp_path, FEED, ws + 20, payload=b"beta")
+
+    ship_ready(lu)
+
+    assert len(up.calls) == 1
+    bucket, key, _ = up.calls[0]
+    assert key.endswith(".tar.gz")
+    data = up.bodies[key]
+
+    class OneKeyUploader:
+        def list_keys(self, _bucket, prefix):
+            return [key] if key.startswith(prefix) else []
+
+        def get_bytes(self, _bucket, requested_key):
+            assert requested_key == key
+            return data
+
+    day = datetime.fromtimestamp(ws, tz=timezone.utc).date()
+    src = S3Source(OneKeyUploader(), bucket, prefix="archive/")
+
+    assert dict(src.iter_bins(FEED, day)) == {
+        f"{first}.bin": b"alpha",
+        f"{second}.bin": b"beta",
+    }
+
+
 def test_all_304_window_ships_metadata_with_no_tar(tmp_path):
     """The gap the .shipped marker exists to close.
 

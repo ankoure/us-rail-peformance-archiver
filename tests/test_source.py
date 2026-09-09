@@ -353,6 +353,53 @@ def test_s3_iter_bins_ignores_unknown_extensions_beside_a_tar():
     ]
 
 
+def test_s3_iter_bins_unpacks_tar_gz_into_members():
+    """A .tar.gz key (current _ship_raw_window format) unpacks the same way."""
+    up = FakeUploader()
+    up.put(
+        RAW_A1 + "window=1700000000--shipped=1700003600.tar.gz",
+        make_tar({"aaa.bin": b"alpha", "bbb.bin": b"beta"}, compressed=True),
+    )
+    src = S3Source(up, "bucket")
+
+    assert dict(src.iter_bins("f", D_A1)) == {"aaa.bin": b"alpha", "bbb.bin": b"beta"}
+
+
+def test_s3_iter_bins_mixes_legacy_tar_and_current_tar_gz():
+    """Both formats come out of one call, as during the .tar -> .tar.gz cutover."""
+    up = FakeUploader()
+    up.put(
+        RAW_A1 + "window=00--shipped=00.tar",
+        make_tar({"aaa.bin": b"alpha"}),
+    )
+    up.put(
+        RAW_A1 + "window=1700000000--shipped=1700003600.tar.gz",
+        make_tar({"bbb.bin": b"beta"}, compressed=True),
+    )
+    src = S3Source(up, "bucket")
+
+    assert dict(src.iter_bins("f", D_A1)) == {"aaa.bin": b"alpha", "bbb.bin": b"beta"}
+
+
+def test_s3_iter_bins_skips_ungzipped_tar_under_gz_key_loudly(caplog):
+    """Mirror of the .tar mismatch test: mode="r:gz" rejects plain tar bytes.
+
+    An uncompressed tar stored under a .tar.gz key must raise ReadError
+    (logged, object skipped), not be silently accepted.
+    """
+    up = FakeUploader()
+    bad_key = RAW_A1 + "window=1700000000--shipped=1700003600.tar.gz"
+    up.put(bad_key, make_tar({"aaa.bin": b"alpha"}, compressed=False))
+    up.put(RAW_A1 + "window=00.bin", b"LEGACY")
+    src = S3Source(up, "bucket")
+
+    with caplog.at_level(logging.ERROR):
+        assert dict(src.iter_bins("f", D_A1)) == {"window=00.bin": b"LEGACY"}
+
+    assert "Unreadable raw tar" in caplog.text
+    assert bad_key in caplog.text
+
+
 def test_s3_iter_bins_skips_gzipped_tar_loudly_and_keeps_going(caplog):
     """The reason mode="r:" was chosen over "r:*".
 

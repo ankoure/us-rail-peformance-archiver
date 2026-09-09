@@ -132,11 +132,12 @@ class S3Source:
     def iter_bins(self, feed, day):
         """Yield (name, bytes) for every payload in the day's raw prefix.
 
-        Two object shapes coexist and both come out of one call: legacy flat
-        `.bin` objects from before the migration, yielded as-is, and `.tar`
-        objects written by LandingUploader._ship_raw_window, unpacked into
-        their `{digest}.bin` members. Callers see the same (name, bytes)
-        contract either way — payloads.iter_payloads dispatches on the name.
+        Three object shapes coexist and all come out of one call: legacy flat
+        `.bin` objects from before the migration, yielded as-is; legacy
+        uncompressed `.tar` objects (pre-gzip _ship_raw_window); and current
+        `.tar.gz` objects, all unpacked into their `{digest}.bin` members.
+        Callers see the same (name, bytes) contract either way —
+        payloads.iter_payloads dispatches on the name.
         """
         prefix = self._day_prefix(feed, "raw", day)
         seen_members: set[str] = set()
@@ -147,55 +148,68 @@ class S3Source:
                 data = self._uploader.get_bytes(self._bucket, key)
                 yield name, data
 
+            elif key.endswith(".tar.gz"):
+                data = self._uploader.get_bytes(self._bucket, key)
+                # mode="r:gz" is exact-match gzip, matching the
+                # tarfile.open(staged, "w:gz") that wrote these — same
+                # "loud failure on mismatch" reasoning as the plain ".tar"
+                # branch below, just for the current format.
+                yield from self._iter_tar_members(data, "r:gz", key, seen_members)
+
             elif key.endswith(".tar"):
                 data = self._uploader.get_bytes(self._bucket, key)
                 # mode="r:" is exact-match uncompressed, matching the
-                # tarfile.open(staged, "w") that wrote these. "r"/"r:*" would
-                # auto-detect and silently accept a gzip'd tar that has no
-                # business being in this path; a loud ReadError is the point.
-                try:
-                    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as tar:
-                        for member in tar:
-                            if not member.isfile():
-                                continue  # dir/link entries carry no payload
+                # tarfile.open(staged, "w") that wrote these (pre-gzip
+                # objects still in S3 from before the .tar.gz switch).
+                # "r"/"r:*" would auto-detect and silently accept a gzip'd
+                # tar that has no business being in this path; a loud
+                # ReadError is the point.
+                yield from self._iter_tar_members(data, "r:", key, seen_members)
 
-                            # arcname was path.name, so a member name should be
-                            # a bare "{digest}.bin". Anything with a path in it
-                            # didn't come from _ship_raw_window; nothing is
-                            # written to disk here so it can't traverse, but it
-                            # would break the digest join downstream.
-                            name = member.name
-                            if "/" in name or name in (".", ".."):
-                                logger.warning(
-                                    "Unexpected non-flat member %r in %s; skipping",
-                                    name,
-                                    key,
-                                )
-                                continue
+    def _iter_tar_members(self, data, mode, key, seen_members):
+        try:
+            with tarfile.open(fileobj=io.BytesIO(data), mode=mode) as tar:
+                for member in tar:
+                    if not member.isfile():
+                        continue  # dir/link entries carry no payload
 
-                            # Retried ships produce a second tar (window_tar_key
-                            # stamps int(time.time()), so the key differs) with
-                            # overlapping members. Names are content digests, so
-                            # a repeat is the same bytes by construction and
-                            # dropping it is safe — yielding it twice would
-                            # double-count the poll in the rollup.
-                            if name in seen_members:
-                                continue
-                            seen_members.add(name)
+                    # arcname was path.name, so a member name should be
+                    # a bare "{digest}.bin". Anything with a path in it
+                    # didn't come from _ship_raw_window; nothing is
+                    # written to disk here so it can't traverse, but it
+                    # would break the digest join downstream.
+                    name = member.name
+                    if "/" in name or name in (".", ".."):
+                        logger.warning(
+                            "Unexpected non-flat member %r in %s; skipping",
+                            name,
+                            key,
+                        )
+                        continue
 
-                            extracted = tar.extractfile(member)
-                            if extracted is None:
-                                continue
-                            yield name, extracted.read()
+                    # Retried ships produce a second tar (window_tar_key
+                    # stamps int(time.time()), so the key differs) with
+                    # overlapping members. Names are content digests, so
+                    # a repeat is the same bytes by construction and
+                    # dropping it is safe — yielding it twice would
+                    # double-count the poll in the rollup.
+                    if name in seen_members:
+                        continue
+                    seen_members.add(name)
 
-                except tarfile.TarError:
-                    logger.exception(
-                        "Unreadable raw tar %s; skipping object (its payloads are "
-                        "lost for this run — the local {digest}.bin files were "
-                        "deleted once the upload was confirmed)",
-                        key,
-                    )
-                    continue
+                    extracted = tar.extractfile(member)
+                    if extracted is None:
+                        continue
+                    yield name, extracted.read()
+
+        except tarfile.TarError:
+            logger.exception(
+                "Unreadable raw tar %s; skipping object (its payloads are "
+                "lost for this run — the local {digest}.bin files were "
+                "deleted once the upload was confirmed)",
+                key,
+            )
+            return
 
     def read_metadata(self, feed, day):
         prefix = self._day_prefix(feed, "metadata", day)

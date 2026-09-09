@@ -17,7 +17,7 @@ since the caller already knows which window it just built a tar for.
 
 Layout:
     {feed}/metadata/year=YYYY/month=MM/day=DD/window=*.jsonl   (WINDOW_OBJECT_GLOBS)
-    {feed}/raw/year=YYYY/month=MM/day=DD/window=*--shipped=*.tar   (window_tar_key)
+    {feed}/raw/year=YYYY/month=MM/day=DD/window=*--shipped=*.tar.gz   (window_tar_key)
 The daily `data.jsonl` (writer.py `append_metadata`) sits in the same metadata
 directory but is local-only — it is excluded for free because its name doesn't
 match `window=*`. Each glob `*` matches exactly one path segment (pathlib never
@@ -84,11 +84,17 @@ def window_tar_key(prefix: str, feed: str, window_unix: int, shipped_unix: int) 
     The shipped= component makes the key unique per upload. Content that
     recurs after its first window's tar was shipped-and-deleted gets a
     fresh {digest}.bin, so a second shipment for the same calendar window
-    is possible — a pure window=<start>.tar key would silently clobber the
+    is possible — a pure window=<start>.tar.gz key would silently clobber the
     first (the latent hazard in _merge_and_ship).
+
+    `.tar.gz`, not `.tar`: gzip cuts cross-region transfer cost for the EU/AU
+    pollers (raw protobuf + repeated JSON-ish structure compresses well) —
+    see archiver/source.py's iter_bins for why this is a distinct extension
+    from the older uncompressed `.tar` objects rather than a format flip on
+    the same one.
     """
     y, m, d = _day_parts(window_unix)
     return (
         f"{prefix}{feed}/raw/{y}/{m}/{d}"
-        f"/window={window_unix}--shipped={shipped_unix}.tar"
+        f"/window={window_unix}--shipped={shipped_unix}.tar.gz"
     )
