@@ -36,13 +36,20 @@ jobs:
     strategy:
       # One box per region (see terraform/box.tf, box_eu.tf, box_au.tf).
       # `services` is passed straight to `docker compose up -d`: empty means
-      # every service in compose.prod.yml (today's us-east-1 behavior,
-      # unchanged); eu/au name only what they actually run, since they don't
-      # start app-shard-1 (single-shard boxes, see compose.prod.yml).
+      # every service in compose.prod.yml; eu/au name only what they actually
+      # run, since they don't start app-shard-1 (single-shard boxes, see
+      # compose.prod.yml).
       matrix:
         include:
           - name: us
             region: us-east-1
+            # us-east-1's .env is pasted out-of-band via SSM, NOT rendered by
+            # terraform (see box.tf) -- it now carries CONTINENT=us (added
+            # manually, undocumented until this comment) so it only polls US
+            # agencies, matching eu/au's own --continent scoping. If this box
+            # is ever replaced, the re-pasted .env MUST include CONTINENT=us
+            # or every EU/AU agency silently goes back to being double-landed
+            # by both this box and its regional box.
             services: ""
           - name: eu
             region: eu-central-1

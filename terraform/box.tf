@@ -8,6 +8,14 @@
 # user_data bootstraps everything EXCEPT `.env` (pasted out-of-band via an SSM
 # session) and the `docker compose up` (held until .env exists, to avoid the new
 # box dual-polling the live one during cutover). A marker file signals readiness.
+#
+# That manually-pasted .env MUST include `CONTINENT=us` (see box_eu.tf/box_au.tf
+# for the same flag on those boxes) -- without it this box falls back to
+# unrestricted (polls/lands every agency globally, not just US), duplicating
+# every EU/AU agency's landing writes against the regional boxes. Not enforced
+# by terraform since the whole file is pasted out-of-band; a future box
+# replacement needs a human to remember this, same as the prune-timer lesson
+# above.
 
 variable "poller_instance_type" {
   type    = string
