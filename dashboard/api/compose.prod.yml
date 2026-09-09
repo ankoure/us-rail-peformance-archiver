@@ -6,6 +6,13 @@ services:
       - .env
     expose:
       - "8000"
+    # Box has 1.8GiB usable RAM and no swap. Without a cap, a heavy query
+    # (e.g. a multi-day pyarrow/S3 read for a large agency) can spike
+    # uvicorn's RSS past what's left after host daemons, and the kernel's
+    # OOM killer picks a victim host-wide instead of just this container
+    # (2026-09-09 incident). Capping here trades that for a scoped,
+    # fast-recovering container OOM kill under `restart: unless-stopped`.
+    mem_limit: 900m
 
   # Reverse proxy + automatic HTTPS (Let's Encrypt via ACME HTTP-01, hence
   # ports 80/443 open on the box's security group). Caddy renews certs on
