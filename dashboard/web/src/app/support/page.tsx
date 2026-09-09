@@ -132,7 +132,7 @@ export default function SupportPage() {
         <p>
           That last number is the one worth sitting with: spread across everything it archives, this
           works out to about{" "}
-          <strong>{Math.round(perAgencyUsd * 100)} cents per transit agency per month</strong>
+          <strong>{Math.round(perAgencyUsd * 100)} cents per transit agency per month</strong> 
           less than a bus fare, for a permanent public record of how that agency actually ran.
         </p>
         <div className="support-actions">
