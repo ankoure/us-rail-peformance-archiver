@@ -5,13 +5,13 @@ import { feedCounts } from "@/lib/agencyParams";
 
 /**
  * Static support page. The app is a static export (`output: "export"`), so there
- * is no server to create a checkout session — every option here is an outbound
+ * is no server to create a checkout session, every option here is an outbound
  * link to a hosted funding page.
  *
  * Update these as the footprint changes; they're the whole argument for the page.
  */
 const MONTHLY_COST_USD = 147;
-const ARCHIVE_START = "March 2026";
+const ARCHIVE_START = "May/June 2026";
 const BILL_MONTH = "August 2026";
 
 /**
@@ -19,12 +19,12 @@ const BILL_MONTH = "August 2026";
  * of the fixed infrastructure, weighted by poll volume. Recompute with
  * `scripts/s3_cost_report.py` when the fleet or the bill moves.
  *
- * Weight by poll volume, not feed count — feed count badly distorts agencies
+ * Weight by poll volume, not feed count, feed count badly distorts agencies
  * with many barely-polled feeds (Bay Area 511 has 18 feeds but only 4 GiB
  * archived, and came out top of the list at $3.79 under per-feed weighting
  * while its real storage is $0.26).
  *
- * This is still an allocation, not a marginal cost — most of the bill is fixed,
+ * This is still an allocation, not a marginal cost, most of the bill is fixed,
  * so dropping a single agency would save far less than this. Tier copy says
  * "covers the cost of" for that reason, never "pays to add".
  */
@@ -56,7 +56,7 @@ const REPO_URL = "https://github.com/ankoure/us-rail-performance-archiver";
 /**
  * Real line items from the AWS bill, rounded to the dollar. Route 53 is left out
  * because this project's DNS isn't hosted there, and part of the compute line is a
- * box shared with a sibling project — so this is the archive's attributable share,
+ * box shared with a sibling project so this is the archive's attributable share,
  * not the raw account total.
  */
 const COSTS = [
@@ -70,7 +70,7 @@ const COSTS = [
     what: "Storage",
     amount: 42,
     detail:
-      "Every payload is landed raw before anything decodes it, so a parsing bug can never lose history. This line only grows — archived bytes are never deleted, just aged into Deep Archive. The single largest holding is Minneapolis\u2013St Paul's Metro Transit, at over 100 GiB.",
+      "Every payload is landed raw before anything decodes it, so a parsing bug can never lose history. This line only grows archived bytes are never deleted, just aged into Deep Archive. The single largest holding is Minneapolis\u2013St Paul's Metro Transit, at over 100 GiB.",
   },
   {
     what: "Rollup compute",
@@ -90,12 +90,12 @@ const COSTS = [
 ];
 
 export const metadata: Metadata = {
-  title: "Support — Transit Dashboard",
+  title: "Support the Transit Dashboard",
   description: "Help cover the hosting costs of an open GTFS-Realtime archive.",
 };
 
 export default function SupportPage() {
-  // Read at build time from config/feeds.yaml — see feedCounts().
+  // Read at build time from config/feeds.yaml see feedCounts().
   const { agencies: agencyCount, feeds: feedCount } = feedCounts();
   const perAgencyUsd = MONTHLY_COST_USD / agencyCount;
 
@@ -104,13 +104,13 @@ export default function SupportPage() {
       <div className="card">
         <h2>Support the archive</h2>
         <p>
-          Transit agencies publish GTFS-Realtime as a <em>live snapshot</em> — ask an agency what
+          Transit agencies publish GTFS-Realtime as a <em>live snapshot</em>, ask an agency what
           its trains were doing last Tuesday and, almost everywhere, the answer is that nobody kept
           it. This project keeps it: every poll from every configured feed, landed raw and rolled up
           into open Parquet, continuously since {ARCHIVE_START}.
         </p>
         <p>
-          It runs on hardware I pay for out of pocket — around{" "}
+          It runs on hardware I pay for out of pocket around{" "}
           <strong>${MONTHLY_COST_USD}/month</strong>. There is no company behind it and no grant
           funding it. If the bill stops getting paid, the archive doesn&rsquo;t just go offline; the
           history stops being recorded, and that gap can never be backfilled.
@@ -132,7 +132,7 @@ export default function SupportPage() {
         <p>
           That last number is the one worth sitting with: spread across everything it archives, this
           works out to about{" "}
-          <strong>{Math.round(perAgencyUsd * 100)} cents per transit agency per month</strong> —
+          <strong>{Math.round(perAgencyUsd * 100)} cents per transit agency per month</strong>
           less than a bus fare, for a permanent public record of how that agency actually ran.
         </p>
         <div className="support-actions">
@@ -179,7 +179,7 @@ export default function SupportPage() {
         </ul>
         <p className="card-hint">
           Actual AWS line items for {BILL_MONTH}, rounded. Contributions cover infrastructure first.
-          Anything past that goes toward onboarding more agencies — every new feed is a permanent,
+          Anything past that goes toward onboarding more agencies every new feed is a permanent,
           recurring storage cost, so more funding genuinely means more of the world archived.
         </p>
       </div>
@@ -200,7 +200,7 @@ export default function SupportPage() {
           ))}
         </ul>
         <p className="card-hint">
-          A &ldquo;typical agency&rdquo; is the median one at ${TYPICAL_AGENCY_USD.toFixed(2)}/mo —
+          A &ldquo;typical agency&rdquo; is the median one at ${TYPICAL_AGENCY_USD.toFixed(2)}/mo
           its own measured storage plus a share of the hosts, egress, and rollup compute, weighted
           by how hard it gets polled. Real agencies span $0.12 for a sleepy single-feed operator up
           to $4.33 for MTA New York City Transit, which runs eight separate subway-line feeds. These
@@ -208,9 +208,9 @@ export default function SupportPage() {
           be far smaller: most of the cost is fixed no matter how many feeds ride on it.
         </p>
         <p className="card-hint">
-          Monthly beats one-time here, and not as an upsell — archived bytes are never deleted, so
+          Monthly beats one-time here, as archived bytes are never deleted, so
           every agency is a bill that recurs forever. A recurring contribution is the only kind that
-          matches the shape of the cost.
+          matches the shape of the cost. Even a recurring donation of $1 would make an impact. 
         </p>
       </div>
 
@@ -219,7 +219,8 @@ export default function SupportPage() {
         <p>
           Money isn&rsquo;t the only useful thing. Reporting a feed that&rsquo;s returning garbage,
           pointing me at an agency endpoint I don&rsquo;t have yet, or telling me a metric on this
-          dashboard looks wrong are all worth real money in saved debugging time. The{" "}
+          dashboard looks wrong are all worth real money in saved debugging time. Bonus points if 
+          you&rsquo;re able to help get me an API for NJ Transit, I applied in March but haven&rsquo;t heard back. The{" "}
           <a className="support-inline-link" href={`${REPO_URL}/issues`}>
             issue tracker
           </a>{" "}
@@ -233,7 +234,7 @@ export default function SupportPage() {
           To be clear about what you&rsquo;re getting: this is a personal project, not a registered
           nonprofit, so contributions are a gift rather than a tax-deductible donation, and buy no
           influence over what gets archived. The code stays MIT-licensed and the dashboard stays
-          free either way — nothing here goes behind a paywall.{" "}
+          free either way nothing here goes behind a paywall.{" "}
           <Link className="support-inline-link" href="/">
             Back to the agencies →
           </Link>
