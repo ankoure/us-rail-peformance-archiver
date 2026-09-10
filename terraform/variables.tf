@@ -211,8 +211,13 @@ variable "heavy_rollup_memory" {
 }
 
 variable "heavy_gtfs_cpu" {
-  type        = string
-  default     = "4096" # 4 vCPU -- paired tier for 20480 MiB (Fargate pairs cpu/memory ranges)
+  type = string
+  # 2026-09-10: cut 4096 -> 2048. GO_AHEAD's gtfs.py now runs alone in this
+  # task (isolated from cold-ship/rollup/hot-ship, unlike the OOM history in
+  # heavy_gtfs_memory below); Sep 5-9 TaskCpuUtilization steadied at ~25% of
+  # the old 4 vCPU after a day-1 outlier, so 2048 (2 vCPU) still leaves ~2x
+  # headroom. Paired tier for 12288 MiB below (2048 CPU supports 4096-16384 MiB).
+  default     = "2048"
   description = "Fargate CPU units for the heavy-agency gtfs stage (GO_AHEAD only)."
 }
 
@@ -225,27 +230,55 @@ variable "heavy_gtfs_memory" {
   # to 20480 instead of guessing again: verified 2026-08-20 (see the old
   # rollup_heavy_memory var this replaces) that GO_AHEAD needs >8 GiB in
   # gtfs.py running ALONE, and 20 GiB was the ceiling that actually worked for
-  # it in that combined task. Same number, now dedicated to gtfs alone instead
-  # of shared with cold-ship/rollup/hot-ship in the same run.
-  default     = "20480"
+  # it in that combined task.
+  #
+  # 2026-09-10: cut 20480 -> 12288. Sep 5-9 TaskMemoryUtilization steadied at
+  # ~15% (~3 GiB) of the 20 GiB ceiling after a day-1 outlier -- but the
+  # 16384 OOM above is real prior evidence for this exact agency, so this
+  # stops short of heavy_gold's more aggressive cut: 12288 keeps a ~4x margin
+  # over the observed steady state while staying below the number that once
+  # OOMed, rather than assuming isolation alone explains all the headroom.
+  # Watch TaskMemoryUtilization for a few days before cutting further.
+  default     = "12288"
   description = "Fargate memory (MiB) for the heavy-agency gtfs stage (GO_AHEAD only)."
 }
 
 variable "heavy_snapshot_cpu" {
-  type        = string
-  default     = "4096" # 4 vCPU -- paired tier for 20480 MiB (Fargate pairs cpu/memory ranges)
+  type = string
+  # 2026-09-10: cut 4096 -> 2048. TaskCpuUtilization has held steady at ~25%
+  # of the old 4 vCPU both before and after the memory fix below (this fix
+  # only shrinks what build_alert_snapshot holds onto, not how much parsing
+  # it does), so 2048 (2 vCPU) leaves ~2x headroom. Paired tier for 8192 MiB
+  # below (2048 CPU supports 4096-16384 MiB).
+  default     = "2048"
   description = "Fargate CPU units for the heavy-agency snapshot stage (BKK/EDMONTON_TRANSIT_SYSTEM/LONDON_TRANSIT_COMMISSION/VBB)."
 }
 
 variable "heavy_snapshot_memory" {
-  type        = string
-  default     = "20480" # 20 GiB
+  type = string
+  # 2026-09-10: cut 20480 -> 12288 (not 8192 -- see below). The 13 GB/day BKK
+  # figure below was the PRE-FIX number: analysis/alert_snapshot.py@e7a3508
+  # (2026-09-06) stopped build_alert_snapshot from holding the raw payload
+  # and full decoded FeedMessage for a whole day, keeping only each poll's
+  # small alert-entity dicts instead. TaskMemoryUtilization confirms it
+  # worked -- the LAST pre-fix run (2026-09-06T00:00 UTC, minutes before the
+  # fix commit landed) hit 92.2%, and every run since (4 straight days, Sep
+  # 6-9) has held 6.6-14.3% (~1.4-2.9 GiB) at workers=1 (one agency at a
+  # time).
+  #
+  # Same pass moved this stage to workers=2 (heavy_stages.tf) since that
+  # per-agency peak leaves plenty of room to run two concurrently. Sized for
+  # a worst case of ~2x the single-agency peak (~5.9 GiB) with a margin on
+  # top of that for the still-small 4-day sample -- 12288 stays well below
+  # the 20480 that ran fine before, but isn't as tight as heavy_gold's cut,
+  # given this task's real (if now-fixed) OOM history.
+  default     = "12288"
   description = <<-EOT
-    Fargate memory (MiB) for the heavy-agency snapshot stage.
-    analysis.alert_snapshot.build_alert_snapshot buffers a whole day of raw
-    payloads in one list -- BKK alone is ~13 GB/day of raw on bkk-trips. Matches
-    the old rollup_heavy ceiling, now dedicated to snapshot alone instead of
-    shared with gtfs/gold/rollup in the same run.
+    Fargate memory (MiB) for the heavy-agency snapshot stage
+    (BKK/EDMONTON_TRANSIT_SYSTEM/LONDON_TRANSIT_COMMISSION/VBB), sized for
+    two concurrent agencies (workers=2). See analysis/alert_snapshot.py's
+    build_alert_snapshot docstring for why this no longer needs to cover a
+    whole day of raw payloads.
   EOT
 }
 
@@ -275,9 +308,14 @@ variable "heavy_gold_memory" {
 }
 
 variable "heavy_stage_workers" {
-  type        = number
-  default     = 4
-  description = "Agencies processed concurrently within the heavy_rollup stage only (the other three heavy stages stay --workers 1, same isolation reasoning as the old rollup_heavy)."
+  type    = number
+  default = 4
+  # heavy_snapshot moved off this shared reasoning 2026-09-10 (now workers=2,
+  # hardcoded in heavy_stages.tf's local.heavy_stage_defs -- see its comment)
+  # once its memory fix made limited concurrency safe. gtfs and gold stay at
+  # workers=1: gtfs is a single agency (GO_AHEAD) so concurrency is moot, and
+  # gold's SIGKILL history was never measured as safe to relax.
+  description = "Agencies processed concurrently within the heavy_rollup stage only (heavy_gtfs/heavy_gold stay --workers 1, same isolation reasoning as the old rollup_heavy; heavy_snapshot is hardcoded separately)."
 }
 
 # --- Per-stage tasks (stages.tf) ------------------------------------------ #
@@ -311,15 +349,21 @@ variable "stage_snapshot_cpu" {
 }
 
 variable "stage_snapshot_memory" {
-  type        = string
+  type = string
+  # NOT cut in the 2026-09-10 pass, unlike heavy_snapshot_memory: the
+  # analysis/alert_snapshot.py@e7a3508 fix (2026-09-06) shrank what
+  # build_alert_snapshot holds per poll, but TaskMemoryUtilization here has
+  # kept climbing since that fix landed (59% Sep 5 -> 88% Sep 9) rather than
+  # dropping the way heavy_snapshot's did -- this stage runs the other ~186
+  # agencies at stage_workers concurrency, so the trend looks like organic
+  # growth (more agencies/regions) across many concurrent workers, not the
+  # single-feed buffering bug the fix targeted. TaskCpuUtilization is also
+  # pegged ~100% here. Watch, don't cut.
   default     = "16384"
   description = <<-EOT
-    Fargate memory (MiB) for the snapshot stage task. snapshot.py accounted for
-    25 of the 42 SIGKILLs in the month to 2026-09-03 because
-    analysis.alert_snapshot.build_alert_snapshot buffers a whole day of raw
-    payloads in one list. The worst offenders (BKK, EDMONTON, LTC, VBB) are in
-    local.heavy_agencies and excluded here, but until that buffer is fixed this
-    stage stays the most likely one to need headroom.
+    Fargate memory (MiB) for the snapshot stage task. The worst single-feed
+    offenders (BKK, EDMONTON, LTC, VBB) are in local.heavy_agencies and
+    excluded here -- see heavy_snapshot_memory for that fix's history.
   EOT
 }
 

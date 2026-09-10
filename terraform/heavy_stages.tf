@@ -57,10 +57,18 @@ locals {
       scheduled = true # no ordering dependency -- plain cron, like the regular gtfs stage
     }
     snapshot = {
-      cpu       = var.heavy_snapshot_cpu
-      memory    = var.heavy_snapshot_memory
-      stages    = "snapshot"
-      workers   = 1
+      cpu    = var.heavy_snapshot_cpu
+      memory = var.heavy_snapshot_memory
+      stages = "snapshot"
+      # 2026-09-10: 1 -> 2. Was serialized because BKK's pre-fix ~13 GB/day
+      # buffer (see heavy_snapshot_memory) made any concurrency with itself
+      # or the other three dangerous. analysis/alert_snapshot.py@e7a3508
+      # fixed that; each agency now peaks ~2.9 GiB alone (Sep 6-9), so two
+      # can safely run at once within heavy_snapshot_memory's new ceiling.
+      # Real task duration logs (Sep 8-9) showed ~60-70 min at workers=1 for
+      # just these 4 agencies -- CPU sat at only ~25% of the old 4 vCPU the
+      # whole time, so this was leaving concurrency on the table for free.
+      workers   = 2
       agencies  = ["BKK", "EDMONTON_TRANSIT_SYSTEM", "LONDON_TRANSIT_COMMISSION", "VBB"]
       silver    = ""
       scheduled = true # backstopped by prune_s3's per-feed snapshot check, same as the regular snapshot stage's relationship to archive
