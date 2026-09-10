@@ -87,14 +87,16 @@ resource "aws_ecs_task_definition" "gold_backfill" {
   family                   = "rail-archiver-gold-backfill"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  # Reuse rollup's cpu/memory rather than guessing a smaller number: gold.py's
+  # Reuse rollup's cpu rather than guessing a smaller number: gold.py's
   # per-day compute (GTFS resolution, pandas OTP, segment speed) is the same
-  # memory-hungry step that runs inside the combined rollup task rollup_memory
-  # was sized for (see its comment -- a real 7.8 GiB measured peak), so gold.py
-  # alone should comfortably fit under the same ceiling. The original 1024/2048
-  # here was an unmeasured guess and SIGKILL'd (OOM) partway through gcrta-vehicles.
+  # memory-hungry step that used to run inside the combined rollup task.
+  # Memory used to reuse rollup_memory too, for the same reason (a real
+  # 7.8 GiB measured peak) -- split onto its own gold_backfill_memory variable
+  # on 2026-09-10 so rollup_memory's rightsizing (see its comment) doesn't
+  # also cut this rare/manual job's margin. The original 1024/2048 here was an
+  # unmeasured guess and SIGKILL'd (OOM) partway through gcrta-vehicles.
   cpu                = var.rollup_cpu
-  memory             = var.rollup_memory
+  memory             = var.gold_backfill_memory
   execution_role_arn = aws_iam_role.rollup_execution.arn
   task_role_arn      = aws_iam_role.gold_backfill_task.arn
 

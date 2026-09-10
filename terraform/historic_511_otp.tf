@@ -70,10 +70,12 @@ resource "aws_ecs_task_definition" "historic_511_otp" {
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   # Pandas over ~10M rows/month (SF alone) — same memory-hungry shape
-  # gold_backfill.tf reuses rollup sizing for; start from the same ceiling
-  # rather than guessing a smaller number.
+  # gold_backfill_memory started from; historic_511_otp_memory carries the
+  # same 16 GiB default (see its comment in variables.tf) rather than
+  # guessing a smaller number, since this task hasn't run against full data
+  # yet to measure against.
   cpu                = var.rollup_cpu
-  memory             = var.rollup_memory
+  memory             = var.historic_511_otp_memory
   execution_role_arn = aws_iam_role.rollup_execution.arn
   task_role_arn      = aws_iam_role.historic_511_otp_task.arn
 

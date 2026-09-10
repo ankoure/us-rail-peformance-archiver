@@ -136,8 +136,43 @@ variable "rollup_memory" {
   # This is a first conservative step, not a measured value: the remaining
   # ~185 agencies still run concurrently (rollup_cpu workers) and share this
   # ceiling, so watch a few post-split runs before cutting further.
-  default     = "16384"
+  # 2026-09-10: cut 16 -> 8 GiB. Since the stage split went live
+  # (stage_schedule_enabled = true), this task only runs the rollup stage --
+  # gtfs/gold/snapshot/ship moved to their own stage_* tasks -- and
+  # TaskMemoryUtilization (Sep 6-9, post-split) maxed at ~14% (~2.3 GiB) of the
+  # old 16 GiB ceiling. 8192 is the floor Fargate allows while keeping
+  # rollup_cpu at 4096 (the 4096 CPU tier requires memory >= 8192 MiB), so this
+  # is as low as this can go without also touching CPU, which stays busy
+  # (TaskCpuUtilization maxed 99% most days) and is untouched here.
+  #
+  # gold_backfill.tf and historic_511_otp.tf used to read this same variable
+  # as deliberate insurance (rare/manual jobs, expensive to re-run on OOM) --
+  # they were split onto their own gold_backfill_memory/historic_511_otp_memory
+  # variables (both still defaulted to 16384) specifically so this cut doesn't
+  # silently shrink their margin too.
+  default     = "8192"
   description = "Fargate task memory (MiB) for the rollup stage (excludes local.heavy_agencies, see rollup_heavy_memory)."
+}
+
+variable "gold_backfill_memory" {
+  type = string
+  # Split off rollup_memory on 2026-09-10 so cutting rollup_memory (see its
+  # comment) doesn't also shrink this rare/manual job's margin. Default carries
+  # forward the exact value rollup_memory had before that cut -- gold_backfill
+  # has never been measured on its own (only one real run, Aug 12-13, which
+  # maxed ~26% of 16 GiB), but it's cheap insurance for a job whose OOM means
+  # re-running expensive backfill work, not a hot path worth optimizing.
+  default     = "16384"
+  description = "Fargate task memory (MiB) for the gold-backfill task (manual reprocessing only)."
+}
+
+variable "historic_511_otp_memory" {
+  type = string
+  # Split off rollup_memory on 2026-09-10, same reasoning as
+  # gold_backfill_memory -- this task hasn't run in prod yet (full backfill is
+  # still pending), so there's no utilization data to size against yet.
+  default     = "16384"
+  description = "Fargate task memory (MiB) for the historic-511 OTP backfill task (manual, not yet run against full data)."
 }
 
 # --- Heavy-agency stages (heavy_stages.tf) --------------------------------- #
@@ -215,18 +250,27 @@ variable "heavy_snapshot_memory" {
 }
 
 variable "heavy_gold_cpu" {
-  type        = string
-  default     = "4096" # 4 vCPU -- paired tier for 24576 MiB
+  type = string
+  # 2026-09-10: cut 4096 -> 2048. This was copy-pasted from stage_gold_cpu
+  # ("matches stage_gold_memory exactly") but stage_gold covers ~182 agencies
+  # vs. heavy_gold's 3 -- never measured on its own. Sep 5-9 TaskCpuUtilization
+  # maxed ~28% of the old 4 vCPU, so 2048 (2 vCPU) still leaves ~2.5x headroom.
+  # Paired tier for 16384 MiB below (2048 CPU supports 4096-16384 MiB).
+  default     = "2048"
   description = "Fargate CPU units for the heavy-agency gold stage (METRO_HOUSTON/CINCINNATI_METRO/URBAN_MOBILITY_CENTER_SOFIA_TRAFFIC)."
 }
 
 variable "heavy_gold_memory" {
-  type        = string
-  default     = "24576" # 24 GiB
+  type = string
+  # 2026-09-10: cut 24576 -> 16384. Sep 5-9 TaskMemoryUtilization maxed ~36%
+  # (~8.8 GiB) of the old 24 GiB ceiling, which was inherited from
+  # stage_gold_memory's 182-agency sizing rather than measured for these 3.
+  # 16 GiB keeps ~1.8x headroom -- less aggressive than the 8.8 GiB peak alone
+  # would justify, deliberately, given gold.py's documented SIGKILL history on
+  # the non-heavy fleet (see stage_gold_memory).
+  default     = "16384"
   description = <<-EOT
-    Fargate memory (MiB) for the heavy-agency gold stage. Matches
-    stage_gold_memory exactly -- same failure mode (gold.py), same reasoning:
-    24 GiB here costs nothing on the other heavy stages' ceilings.
+    Fargate memory (MiB) for the heavy-agency gold stage.
   EOT
 }
 
@@ -286,8 +330,14 @@ variable "stage_archive_cpu" {
 }
 
 variable "stage_archive_memory" {
-  type        = string
-  default     = "8192"
+  type = string
+  # 2026-09-10: cut 8192 -> 4096, the floor Fargate allows at
+  # stage_archive_cpu = 2048 (valid range 4096-16384 MiB). Sep 5-9
+  # TaskMemoryUtilization maxed ~4% (~330 MiB) of the old 8 GiB ceiling --
+  # Shipper._build_tarball's streaming design (below) means this was never
+  # going to be memory-bound. CPU is the actual bottleneck here (maxed 60-99%
+  # daily) but is left untouched in this pass.
+  default     = "4096"
   description = <<-EOT
     Fargate memory (MiB) for the archive stage task. Shipper._build_tarball
     streams one landing object at a time rather than materializing a day, so

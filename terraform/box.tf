@@ -19,7 +19,15 @@
 
 variable "poller_instance_type" {
   type    = string
-  default = "t4g.medium" # ARM/Graviton, 2 vCPU / 4 GiB
+  default = "t4g.small" # ARM/Graviton, 2 vCPU / 2 GiB -- downsized 2026-09-10: live
+  # telemetry showed ~700MB/3.7GB RAM used and load avg <0.4 even at 148 US
+  # agencies (post CONTINENT=us narrowing), so the t4g.medium bump from
+  # 2026-08-14 (149a21f, added for then-more-agencies load) has real headroom
+  # to give back. The historical 3x OOM crash-loop was fixed via the DELFI
+  # feed removal + per-poll entity-count walk in archiver code, not by
+  # instance size -- those guards should hold regardless of box size. No
+  # CloudWatch memory metric exists on this box, so watch it for a few days
+  # after this change.
 }
 
 variable "poller_root_gb" {
